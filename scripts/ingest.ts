@@ -334,6 +334,19 @@ async function ingestDate(date: string, maxPages: number | null): Promise<Ingest
       break;
     }
 
+    // The Page$N postback can come back 200 OK with the grid present but silently NOT
+    // advance (observed live: every page, and even Sort$* postbacks, returned page-1's exact
+    // content). Appending that would duplicate page 1 under the guise of pages 2..N, so any
+    // page whose grid HTML is byte-identical to the one just parsed is treated as a stall,
+    // not progress, and ingest stops rather than silently fabricating "more" data.
+    if (nextGrid === gridHtml) {
+      errors.push(
+        `Page ${nextPageNum} returned content identical to page ${pageNum} — the site did not actually advance ` +
+          `the page (postback stalled). Stopping with only the ${rows.length} genuinely distinct rows collected so far.`
+      );
+      break;
+    }
+
     html = pageRes.body;
     gridHtml = nextGrid;
     hiddenFields = extractHiddenFields(html);

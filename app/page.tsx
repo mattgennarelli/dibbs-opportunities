@@ -63,6 +63,26 @@ function compareValues(a: Solicitation, b: Solicitation, key: SortKey): number {
   return String(av).localeCompare(String(bv));
 }
 
+// DIBBS legitimately lists multiple line items (different PR#/qty) under one solicitation
+// number, so solicitationNumberRaw alone is not a unique row key. Only rows identical in
+// EVERY field are true duplicates (e.g. an accidental page re-fetch) and get collapsed here;
+// distinct line items under the same solicitation number are kept and get a composite key.
+function dedupeExactRows(rows: Solicitation[]): Solicitation[] {
+  const seen = new Set<string>();
+  const out: Solicitation[] = [];
+  for (const row of rows) {
+    const fingerprint = JSON.stringify(row);
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    out.push(row);
+  }
+  return out;
+}
+
+function rowKey(row: Solicitation, index: number): string {
+  return `${row.solicitationNumberRaw}__${row.nsnDigits}__${row.purchaseRequestNumber ?? "noPr"}__${index}`;
+}
+
 function Badges({ badges }: { badges: Badge[] }) {
   if (badges.length === 0) return <span className="text-zinc-400 dark:text-zinc-500">—</span>;
   return (
@@ -92,11 +112,20 @@ export default function Home() {
       .catch((err) => setFetchError(String(err)));
   }, []);
 
+  const dedupedRows = useMemo(() => (data?.rows ? dedupeExactRows(data.rows) : []), [data]);
+
+  const lineCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of dedupedRows) {
+      counts.set(row.solicitationNumberRaw, (counts.get(row.solicitationNumberRaw) ?? 0) + 1);
+    }
+    return counts;
+  }, [dedupedRows]);
+
   const sortedRows = useMemo(() => {
-    if (!data?.rows) return [];
-    const sorted = [...data.rows].sort((a, b) => compareValues(a, b, sortKey));
+    const sorted = [...dedupedRows].sort((a, b) => compareValues(a, b, sortKey));
     return sortDir === "asc" ? sorted : sorted.reverse();
-  }, [data, sortKey, sortDir]);
+  }, [dedupedRows, sortKey, sortDir]);
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
@@ -197,9 +226,9 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedRows.map((row) => (
+                  {sortedRows.map((row, index) => (
                     <tr
-                      key={row.solicitationNumberRaw}
+                      key={rowKey(row, index)}
                       className="border-t border-zinc-200 odd:bg-white even:bg-zinc-50 dark:border-zinc-800 dark:odd:bg-zinc-950 dark:even:bg-black"
                     >
                       <td className="whitespace-nowrap px-3 py-2">
@@ -207,7 +236,17 @@ export default function Home() {
                         <div className="text-xs text-zinc-500 dark:text-zinc-500">FSC {row.fsc}</div>
                       </td>
                       <td className="px-3 py-2 max-w-[260px]">{cell(row.nomenclature)}</td>
-                      <td className="whitespace-nowrap px-3 py-2 font-mono">{row.solicitationNumber}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono">
+                        {row.solicitationNumber}
+                        {(lineCounts.get(row.solicitationNumberRaw) ?? 1) > 1 && (
+                          <span
+                            className="ml-1 rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-sans font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                            title="This solicitation has multiple line items (different purchase requests/quantities) in this listing"
+                          >
+                            {lineCounts.get(row.solicitationNumberRaw)} lines
+                          </span>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap px-3 py-2">
                         {row.solicitationType ? SOLICITATION_TYPE_LABELS[row.solicitationType] : "—"}
                       </td>
