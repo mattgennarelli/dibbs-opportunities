@@ -117,6 +117,10 @@ export default function Home() {
   const [fastAwardOnly, setFastAwardOnly] = useState(false);
   const [setAsideOnly, setSetAsideOnly] = useState(false);
   const [minQty, setMinQty] = useState("");
+  const [hasTechDocsOnly, setHasTechDocsOnly] = useState(false);
+  const [closingWithinDays, setClosingWithinDays] = useState("");
+  const [nowTs, setNowTs] = useState<number | null>(null);
+  useEffect(() => setNowTs(Date.now()), []);
 
   const dedupedRows = useMemo(() => (data?.rows ? dedupeExactRows(data.rows) : []), [data]);
 
@@ -140,6 +144,7 @@ export default function Home() {
     const needle = search.trim().toLowerCase();
     const needleDigitsOnly = needle.replace(/\D/g, "");
     const minQtyNum = minQty.trim() === "" ? null : Number(minQty);
+    const closingWithinDaysNum = closingWithinDays.trim() === "" ? null : Number(closingWithinDays);
 
     return dedupedRows.filter((row) => {
       if (needle) {
@@ -158,14 +163,30 @@ export default function Home() {
       if (minQtyNum !== null && !Number.isNaN(minQtyNum)) {
         if (row.quantity === null || row.quantity < minQtyNum) return false;
       }
+      if (hasTechDocsOnly && row.technicalDocuments !== "present") return false;
+      if (nowTs !== null && closingWithinDaysNum !== null && !Number.isNaN(closingWithinDaysNum)) {
+        if (row.returnByDate === null) return false;
+        const daysUntil = (new Date(row.returnByDate).getTime() - nowTs) / (1000 * 60 * 60 * 24);
+        if (daysUntil > closingWithinDaysNum) return false;
+      }
       return true;
     });
-  }, [dedupedRows, search, fscFilter, fastAwardOnly, setAsideOnly, minQty]);
+  }, [dedupedRows, search, fscFilter, fastAwardOnly, setAsideOnly, minQty, hasTechDocsOnly, closingWithinDays, nowTs]);
 
   const sortedRows = useMemo(() => {
     const sorted = [...filteredRows].sort((a, b) => compareValues(a, b, sortKey));
     return sortDir === "asc" ? sorted : sorted.reverse();
   }, [filteredRows, sortKey, sortDir]);
+
+  function clearFilters() {
+    setSearch("");
+    setFscFilter("");
+    setFastAwardOnly(false);
+    setSetAsideOnly(false);
+    setMinQty("");
+    setHasTechDocsOnly(false);
+    setClosingWithinDays("");
+  }
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
@@ -290,6 +311,32 @@ export default function Home() {
                 <input type="checkbox" checked={setAsideOnly} onChange={(e) => setSetAsideOnly(e.target.checked)} />
                 Small-business set-aside only
               </label>
+              <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={hasTechDocsOnly}
+                  onChange={(e) => setHasTechDocsOnly(e.target.checked)}
+                />
+                Has tech docs
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                Closing within (days)
+                <input
+                  type="number"
+                  min={0}
+                  value={closingWithinDays}
+                  onChange={(e) => setClosingWithinDays(e.target.value)}
+                  placeholder="e.g. 7"
+                  className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-sm text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="rounded border border-zinc-300 px-3 py-1 text-sm text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Clear all
+              </button>
               <span className="ml-auto text-sm text-zinc-600 dark:text-zinc-400">
                 Showing{" "}
                 <strong className="text-black dark:text-zinc-50">
