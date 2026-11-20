@@ -112,6 +112,12 @@ export default function Home() {
       .catch((err) => setFetchError(String(err)));
   }, []);
 
+  const [search, setSearch] = useState("");
+  const [fscFilter, setFscFilter] = useState("");
+  const [fastAwardOnly, setFastAwardOnly] = useState(false);
+  const [setAsideOnly, setSetAsideOnly] = useState(false);
+  const [minQty, setMinQty] = useState("");
+
   const dedupedRows = useMemo(() => (data?.rows ? dedupeExactRows(data.rows) : []), [data]);
 
   const lineCounts = useMemo(() => {
@@ -122,10 +128,44 @@ export default function Home() {
     return counts;
   }, [dedupedRows]);
 
+  const fscOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of dedupedRows) {
+      counts.set(row.fsc, (counts.get(row.fsc) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [dedupedRows]);
+
+  const filteredRows = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    const needleDigitsOnly = needle.replace(/\D/g, "");
+    const minQtyNum = minQty.trim() === "" ? null : Number(minQty);
+
+    return dedupedRows.filter((row) => {
+      if (needle) {
+        const nsnNoDash = row.nsn.replace(/-/g, "").toLowerCase();
+        const matchesSearch =
+          row.nsn.toLowerCase().includes(needle) ||
+          (needleDigitsOnly && nsnNoDash.includes(needleDigitsOnly)) ||
+          row.nomenclature.toLowerCase().includes(needle) ||
+          row.solicitationNumber.toLowerCase().includes(needle) ||
+          row.solicitationNumberRaw.toLowerCase().includes(needle);
+        if (!matchesSearch) return false;
+      }
+      if (fscFilter && row.fsc !== fscFilter) return false;
+      if (fastAwardOnly && !row.badges.includes("fastAward")) return false;
+      if (setAsideOnly && !row.badges.includes("smallBusinessSetAside")) return false;
+      if (minQtyNum !== null && !Number.isNaN(minQtyNum)) {
+        if (row.quantity === null || row.quantity < minQtyNum) return false;
+      }
+      return true;
+    });
+  }, [dedupedRows, search, fscFilter, fastAwardOnly, setAsideOnly, minQty]);
+
   const sortedRows = useMemo(() => {
-    const sorted = [...dedupedRows].sort((a, b) => compareValues(a, b, sortKey));
+    const sorted = [...filteredRows].sort((a, b) => compareValues(a, b, sortKey));
     return sortDir === "asc" ? sorted : sorted.reverse();
-  }, [dedupedRows, sortKey, sortDir]);
+  }, [filteredRows, sortKey, sortDir]);
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
@@ -204,6 +244,60 @@ export default function Home() {
                 </ul>
               </div>
             )}
+
+            <div className="flex flex-wrap items-end gap-3 rounded border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+              <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                Search
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="NSN, nomenclature, solicitation #"
+                  className="w-64 rounded border border-zinc-300 bg-white px-2 py-1 text-sm text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                FSC
+                <select
+                  value={fscFilter}
+                  onChange={(e) => setFscFilter(e.target.value)}
+                  className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                >
+                  <option value="">All ({dedupedRows.length})</option>
+                  {fscOptions.map(([fsc, count]) => (
+                    <option key={fsc} value={fsc}>
+                      {fsc} ({count})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                Min qty
+                <input
+                  type="number"
+                  min={0}
+                  value={minQty}
+                  onChange={(e) => setMinQty(e.target.value)}
+                  placeholder="0"
+                  className="w-24 rounded border border-zinc-300 bg-white px-2 py-1 text-sm text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                <input type="checkbox" checked={fastAwardOnly} onChange={(e) => setFastAwardOnly(e.target.checked)} />
+                Fast Award only
+              </label>
+              <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                <input type="checkbox" checked={setAsideOnly} onChange={(e) => setSetAsideOnly(e.target.checked)} />
+                Small-business set-aside only
+              </label>
+              <span className="ml-auto text-sm text-zinc-600 dark:text-zinc-400">
+                Showing{" "}
+                <strong className="text-black dark:text-zinc-50">
+                  {filteredRows.length} of {dedupedRows.length}
+                </strong>{" "}
+                loaded RFQs
+              </span>
+            </div>
 
             <div className="overflow-x-auto rounded border border-zinc-200 dark:border-zinc-800">
               <table className="w-full min-w-[1100px] border-collapse text-sm">
