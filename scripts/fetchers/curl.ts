@@ -261,12 +261,19 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
 }
 
 export async function getLatestIssueDate(): Promise<string> {
+  const [latest] = await listRecentIssueDates(1);
+  if (!latest) throw new Error("Could not find any issue date link on RfqDates.aspx");
+  return latest;
+}
+
+// Returns up to `count` issue dates, most recent first, as listed on RfqDates.aspx.
+export async function listRecentIssueDates(count: number): Promise<string[]> {
   await establishSession();
   const html = await getPage(`${BASE}/Rfq/RfqDates.aspx?category=issue`);
   if (isRejectedOrWarningPage(html)) {
     throw new Error("Received the WAF/consent page instead of RfqDates.aspx");
   }
-  const m = html.match(/Value=(\d{2}-\d{2}-\d{4})'[^>]*title='Link to RFQ data'/);
-  if (!m) throw new Error("Could not find any issue date link on RfqDates.aspx");
-  return m[1];
+  const matches = html.matchAll(/Value=(\d{2}-\d{2}-\d{4})'[^>]*title='Link to RFQ data'/g);
+  const dates = [...new Set([...matches].map((m) => m[1]))];
+  return dates.slice(0, count);
 }
