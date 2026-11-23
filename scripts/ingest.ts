@@ -79,9 +79,11 @@ async function main() {
     result = {
       date,
       recordsFound: null,
+      recordsFoundEnd: null,
       rows: [],
       fetchedAt: new Date().toISOString(),
       errors: [`Ingest failed before any rows were parsed: ${err instanceof Error ? err.message : String(err)}`],
+      status: "partial",
     };
     await writeFile(outPath, JSON.stringify(result, null, 2));
     console.error("[ingest] FAILED:", result.errors[0]);
@@ -93,7 +95,9 @@ async function main() {
 
   console.log("\n[ingest] Summary");
   console.log(`  date: ${result.date}`);
-  console.log(`  recordsFound: ${result.recordsFound}`);
+  console.log(`  status: ${result.status}`);
+  console.log(`  recordsFound (start): ${result.recordsFound}`);
+  console.log(`  recordsFound (end): ${result.recordsFoundEnd}`);
   console.log(`  rowsParsed: ${result.rows.length}`);
   console.log(`  errors: ${result.errors.length ? result.errors.join(" | ") : "none"}`);
   console.log(`  wrote: ${outPath}`);

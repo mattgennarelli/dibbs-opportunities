@@ -240,8 +240,10 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
     }
   }
 
-  if (maxPages === null && recordsFound !== null && rows.length !== recordsFound) {
-    errors.push(`Row count mismatch: parsed ${rows.length} rows but site reported Records Found: ${recordsFound}.`);
+  const uniqueCount = new Set(rows.map((r) => `${r.solicitationNumberRaw}|${r.nsnDigits ?? r.nsnRaw}|${r.purchaseRequestNumber ?? ""}`)).size;
+  const status: "complete" | "partial" = maxPages === null && recordsFound !== null && uniqueCount < recordsFound ? "partial" : "complete";
+  if (status === "partial") {
+    errors.push(`Partial: parsed ${uniqueCount} unique rows but site reported Records Found: ${recordsFound}.`);
   }
 
   if (diagnostics.unexpectedTechDocsSamples.length > 0) {
@@ -252,7 +254,10 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
   }
   console.log("[ingest:curl] Distinct badge icon filenames seen:", [...diagnostics.badgeFilenames].join(", ") || "(none)");
 
-  return { date, recordsFound, rows, fetchedAt, errors };
+  // Not re-checked at the end for this fallback fetcher (its paging is already known-broken --
+  // see the header comment); recordsFoundEnd mirrors the start value rather than claiming a
+  // check that wasn't done.
+  return { date, recordsFound, recordsFoundEnd: recordsFound, rows, fetchedAt, errors, status };
 }
 
 export async function getLatestIssueDate(): Promise<string> {

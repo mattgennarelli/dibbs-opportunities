@@ -32,8 +32,17 @@ export interface Solicitation {
 
 export interface IngestResult {
   date: string;
+  // Records Found as reported at the start of the run.
   recordsFound: number | null;
+  // Records Found as reported after the last page fetched. DIBBS is a live site --
+  // solicitations can close/post mid-run -- so this can differ from recordsFound; when it
+  // does, errors[] records the exact before/after values rather than silently picking one.
+  recordsFoundEnd: number | null;
   rows: Solicitation[];
   fetchedAt: string;
   errors: string[];
+  // "partial" whenever unique rows < recordsFound, so a short run is never mistaken for a
+  // complete one just because it exited without throwing. The next nightly ingest's upsert
+  // is expected to catch any stragglers.
+  status: "complete" | "partial";
 }

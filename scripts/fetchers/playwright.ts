@@ -6,6 +6,8 @@
 // cookies, or body field order -- bisected exhaustively on 2026-11-23, see NOTES.md. A real
 // browser executes the page's own click handler, which we can't fully replicate via curl.
 
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { chromium, type Page } from "playwright";
 import type { Solicitation, IngestResult } from "../../lib/solicitation.ts";
 import type { Diagnostics } from "../../lib/parseRfqGrid.ts";
@@ -13,6 +15,14 @@ import { parseRecordsFound, splitRows, parseRow, rowKey } from "../../lib/parseR
 
 const BASE = "https://www.dibbs.bsm.dla.mil";
 const PAGE_SIZE = 50;
+const DEBUG_DIR = "data/debug";
+
+// Saves a page's raw HTML for diagnosis when it yields an unexpected row count. Not meant
+// to be read by anything automated -- gitignored, purely a breadcrumb for a human to look at.
+async function saveDebugPage(date: string, pageNum: number, html: string): Promise<void> {
+  await mkdir(DEBUG_DIR, { recursive: true });
+  await writeFile(path.join(DEBUG_DIR, `${date}-page${pageNum}.html`), html);
+}
 
 async function dismissDodWarningIfPresent(page: Page): Promise<void> {
   if (!page.url().includes("dodwarning.aspx")) return;
@@ -71,7 +81,7 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
     console.log(`[ingest:playwright] ${date}: Records Found = ${recordsFound ?? "unknown"}`);
     const totalPages = recordsFound !== null ? Math.ceil(recordsFound / PAGE_SIZE) : null;
 
-    async function parseCurrentPage(pageNum: number): Promise<Solicitation[]> {
+    async function parseCurrentPage(pageNum: number): Promise<{ pageRows: Solicitation[]; gridHtml: string }> {
       const gridHtml = await page.evaluate(
         () => document.getElementById("ctl00_cph1_grdRfqSearch")?.outerHTML ?? ""
       );
@@ -81,14 +91,29 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
         const row = parseRow(chunk, date, fetchedAt, diagnostics, BASE);
         if (row) pageRows.push(row);
       }
-      return pageRows;
+      return { pageRows, gridHtml };
+    }
+
+    // Checks and, if warranted, saves a debug dump for a page that didn't yield exactly
+    // PAGE_SIZE rows -- except the last page, where a short final page is expected.
+    async function checkPageRowCount(pageNum: number, pageRows: Solicitation[], gridHtml: string): Promise<void> {
+      const isLastPage = totalPages !== null && pageNum >= totalPages;
+      if (pageRows.length !== PAGE_SIZE && !isLastPage) {
+        await saveDebugPage(date, pageNum, gridHtml);
+        errors.push(
+          `Page ${pageNum} yielded ${pageRows.length} rows (expected ${PAGE_SIZE}); raw HTML saved to ` +
+            `${DEBUG_DIR}/${date}-page${pageNum}.html for diagnosis.`
+        );
+      }
     }
 
     let pageNum = 1;
     const seenFirstRowKeys = new Set<string>();
 
     // Page 1 is already loaded (no click needed).
-    let pageRows = await parseCurrentPage(pageNum);
+    const page1 = await parseCurrentPage(pageNum);
+    let pageRows = page1.pageRows;
+    await checkPageRowCount(pageNum, page1.pageRows, page1.gridHtml);
 
     while (true) {
       if (pageRows.length === 0) {
@@ -109,6 +134,9 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
         `[ingest:playwright] ${date}: page ${pageNum}${totalPages ? `/${totalPages}` : ""} parsed, ${rows.length} rows so far`
       );
 
+      // Stop once the expected number of pages has been fetched -- never attempt to click a
+      // page that can't exist, which previously produced a spurious "could not click" error.
+      if (totalPages !== null && pageNum >= totalPages) break;
       if (recordsFound !== null && rows.length >= recordsFound) break;
       if (maxPages !== null && pageNum >= maxPages) {
         errors.push(`Stopped after --max-pages ${maxPages} (sample run; ${rows.length}/${recordsFound ?? "unknown"} rows fetched).`);
@@ -116,15 +144,15 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
       }
 
       const nextPageNum = pageNum + 1;
-      let nextRows: Solicitation[];
+      let next: { pageRows: Solicitation[]; gridHtml: string };
       try {
         await clickPage(page, nextPageNum);
-        nextRows = await parseCurrentPage(nextPageNum);
-        if (nextRows.length > 0 && seenFirstRowKeys.has(rowKey(nextRows[0]))) {
+        next = await parseCurrentPage(nextPageNum);
+        if (next.pageRows.length > 0 && seenFirstRowKeys.has(rowKey(next.pageRows[0]))) {
           // Stalled: the postback didn't actually advance. Guard per spec: retry this one
           // page click once before failing loudly.
           await clickPage(page, nextPageNum);
-          nextRows = await parseCurrentPage(nextPageNum);
+          next = await parseCurrentPage(nextPageNum);
         }
       } catch (err) {
         errors.push(
@@ -134,7 +162,7 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
         break;
       }
 
-      if (nextRows.length > 0 && seenFirstRowKeys.has(rowKey(nextRows[0]))) {
+      if (next.pageRows.length > 0 && seenFirstRowKeys.has(rowKey(next.pageRows[0]))) {
         errors.push(
           `Page ${nextPageNum}'s first row repeats a previously seen page after clicking and one retry -- ` +
             `pagination stalled. Stopping with ${rows.length} rows collected so far.`
@@ -142,22 +170,41 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
         break;
       }
 
+      await checkPageRowCount(nextPageNum, next.pageRows, next.gridHtml);
       pageNum = nextPageNum;
-      pageRows = nextRows;
+      pageRows = next.pageRows;
       if (pageNum > 500) {
         errors.push(`Aborted after ${pageNum} pages as a safety stop (recordsFound=${recordsFound}).`);
         break;
       }
     }
 
+    // Records Found read again at the end -- DIBBS is a live site, so a long run can see
+    // solicitations post or close partway through. Recorded explicitly rather than silently
+    // trusting whichever value happened to be read.
+    const recordsFoundEnd = parseRecordsFound(await page.content());
+    if (recordsFound !== recordsFoundEnd) {
+      errors.push(`Site data changed during run (Records Found ${recordsFound} -> ${recordsFoundEnd}).`);
+    }
+
     // Completeness check: unique rows must equal Records Found, or this is reported loudly,
     // never silently truncated or fabricated (CLAUDE.md: never invent values, missing = null).
+    // Status "partial" makes a short run impossible to mistake for a complete one; the next
+    // nightly ingest's upsert is expected to pick up any stragglers.
     const uniqueKeys = new Set(rows.map(rowKey));
-    if (maxPages === null && recordsFound !== null && uniqueKeys.size !== recordsFound) {
+    let status: IngestResult["status"] = "complete";
+    if (maxPages !== null) {
+      status = "partial";
+    } else if (recordsFound !== null && uniqueKeys.size < recordsFound) {
+      status = "partial";
       errors.push(
-        `Completeness check failed: ${uniqueKeys.size} unique rows parsed but site reported ` +
-          `Records Found: ${recordsFound}.`
+        `Partial: ${uniqueKeys.size} unique rows parsed, ${recordsFound} expected ` +
+          `(missing ${recordsFound - uniqueKeys.size}).`
       );
+    } else if (recordsFound !== null && uniqueKeys.size > recordsFound) {
+      // Over-count is still worth surfacing (e.g. recordsFoundEnd grew), but isn't "missing"
+      // data, so it doesn't flip status to partial.
+      errors.push(`${uniqueKeys.size} unique rows parsed, more than the ${recordsFound} originally reported.`);
     }
     if (uniqueKeys.size !== rows.length) {
       errors.push(`Found ${rows.length - uniqueKeys.size} duplicate row(s) across pages (same composite key twice).`);
@@ -172,7 +219,7 @@ export async function fetchDay(date: string, maxPages: number | null): Promise<I
       [...diagnostics.badgeFilenames].join(", ") || "(none)"
     );
 
-    return { date, recordsFound, rows, fetchedAt, errors };
+    return { date, recordsFound, recordsFoundEnd, rows, fetchedAt, errors, status };
   } finally {
     await browser.close();
   }
