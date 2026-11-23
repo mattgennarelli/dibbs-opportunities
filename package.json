@@ -7,11 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "ingest": "node --experimental-strip-types scripts/ingest.ts"
+    "ingest": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/ingest.ts",
+    "migrate": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/migrate.ts"
   },
   "dependencies": {
     "next": "16.4.6",
     "playwright": "^1.65.1",
+    "postgres": "^4.1.1",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

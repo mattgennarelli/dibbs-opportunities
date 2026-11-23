@@ -102,6 +102,20 @@ async function main() {
   console.log(`  errors: ${result.errors.length ? result.errors.join(" | ") : "none"}`);
   console.log(`  wrote: ${outPath}`);
 
+  // DB write is additive to the JSON file, not a replacement for it yet -- skips gracefully
+  // (not a failure) when DATABASE_URL isn't configured, so ingest still works without Postgres.
+  if (process.env.DATABASE_URL) {
+    const { upsertSolicitations } = await import("./db/upsertSolicitations.ts");
+    const dbSummary = await upsertSolicitations(result.rows);
+    console.log(
+      `  db: inserted=${dbSummary.inserted} updated=${dbSummary.updated} collisions=${dbSummary.collisions}`
+    );
+    const { sql } = await import("../lib/db.ts");
+    await sql.end();
+  } else {
+    console.log("  db: skipped (DATABASE_URL not set)");
+  }
+
   if (result.errors.length > 0) process.exitCode = 1;
 }
 

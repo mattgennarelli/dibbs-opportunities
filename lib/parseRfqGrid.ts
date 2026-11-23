@@ -14,7 +14,7 @@ export function parseRecordsFound(html: string): number | null {
   return Number(m[1].replace(/,/g, ""));
 }
 
-function parseIsoDate(mmddyyyy: string | undefined | null): string | null {
+export function parseIsoDate(mmddyyyy: string | undefined | null): string | null {
   if (!mmddyyyy) return null;
   const m = mmddyyyy.trim().match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (!m) return null;
