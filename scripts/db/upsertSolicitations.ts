@@ -31,6 +31,7 @@ const DB_COLUMNS = [
   "fetched_at",
   "fsc",
   "solicitation_type",
+  "has_attachments",
 ] as const;
 
 interface DbRow {
@@ -43,7 +44,7 @@ interface DbRow {
   solicitation_number: string;
   solicitation_number_raw: string;
   document_url: string | null;
-  status: string;
+  status: string | null;
   purchase_request_number: string | null;
   quantity: number | null;
   issued_date: string | null;
@@ -54,6 +55,7 @@ interface DbRow {
   fetched_at: string;
   fsc: string | null;
   solicitation_type: string | null;
+  has_attachments: boolean;
 }
 
 function toDbRow(row: Solicitation): DbRow {
@@ -84,6 +86,7 @@ function toDbRow(row: Solicitation): DbRow {
     fetched_at: row.fetchedAt,
     fsc: row.fsc,
     solicitation_type: row.solicitationType,
+    has_attachments: row.hasAttachments,
   };
 }
 
@@ -162,6 +165,7 @@ export async function upsertSolicitations(rows: Solicitation[]): Promise<UpsertS
           package_view_url    = EXCLUDED.package_view_url,
           fsc                 = EXCLUDED.fsc,
           solicitation_type   = EXCLUDED.solicitation_type,
+          has_attachments     = EXCLUDED.has_attachments,
           -- Always bumped: this run saw the row again, regardless of whether anything changed.
           fetched_at          = EXCLUDED.fetched_at,
           last_seen_at        = now(),
@@ -174,13 +178,15 @@ export async function upsertSolicitations(rows: Solicitation[]): Promise<UpsertS
               solicitations.nomenclature, solicitations.technical_documents,
               solicitations.document_url, solicitations.status, solicitations.quantity,
               solicitations.issued_date, solicitations.return_by_date, solicitations.badges,
-              solicitations.package_view_url, solicitations.fsc, solicitations.solicitation_type
+              solicitations.package_view_url, solicitations.fsc, solicitations.solicitation_type,
+              solicitations.has_attachments
             ) IS DISTINCT FROM (
               EXCLUDED.nsn, EXCLUDED.nsn_raw, EXCLUDED.nsn_digits,
               EXCLUDED.nomenclature, EXCLUDED.technical_documents,
               EXCLUDED.document_url, EXCLUDED.status, EXCLUDED.quantity,
               EXCLUDED.issued_date, EXCLUDED.return_by_date, EXCLUDED.badges,
-              EXCLUDED.package_view_url, EXCLUDED.fsc, EXCLUDED.solicitation_type
+              EXCLUDED.package_view_url, EXCLUDED.fsc, EXCLUDED.solicitation_type,
+              EXCLUDED.has_attachments
             )
             THEN now()
             ELSE solicitations.updated_at

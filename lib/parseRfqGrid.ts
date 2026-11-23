@@ -81,10 +81,30 @@ export function parseRow(
   const nsnMatch = chunk.match(/_lblNsn"[^>]*>(?:<a href=['"][^'"]+['"][^>]*>)?([^<]+)(?:<\/a>)?/);
   const nomMatch = chunk.match(/_lblNomenclature"[^>]*>([^<]*)</);
   const techDocsMatch = chunk.match(/_lblTechnicalDocuments"[^>]*>([\s\S]*?)<\/span>/);
+  // The solicitation-number anchor sometimes wraps a second line inside itself --
+  // "<br>--»Attachments" -- before closing. Found 2026-11-23: that extra "<" broke the old
+  // `>([^<]+)<\/a>` capture entirely, silently dropping the whole row (2/4,399 on
+  // 11-20-2026, page 73). The attachments marker is now its own optional group instead of
+  // being swallowed as part of the number text.
+  //
+  // The trailing solicitationNumberRaw used to require a literal lowercase
+  // "rfqrec.aspx?sn=" -- normally found in a secondary "Package View" link later in the
+  // cell. But a row with an attachments marker has no such secondary link; its *primary*
+  // href is "RFQRec.aspx?sn=..." (capitalized, no download-link detour), which the
+  // case-sensitive literal never matched. Matching bare "sn=" instead of the whole path
+  // works for both shapes (observed: the query param name itself is always lowercase).
   const solMatch = chunk.match(
-    /_lblSolicitation"[^>]*><a href=['"]([^'"]+)['"][^>]*>([^<]+)<\/a>[\s\S]*?rfqrec\.aspx\?sn=([A-Za-z0-9]+)/
+    /_lblSolicitation"[^>]*><a href=['"]([^'"]+)['"][^>]*>([^<]+)(<br\s*\/?>[^<]*Attachments[^<]*)?<\/a>[\s\S]*?[?&]sn=([A-Za-z0-9]+)/
   );
-  const statusMatch = chunk.match(/_lblStatus">(?:<span[^>]*>)?([^<]+)/);
+  // Status text can be wrapped in extra tags beyond the one optional <span> the old regex
+  // allowed for -- e.g. "<span><strong>Removed</strong></span>" -- which made the whole
+  // match fail and silently fell back to '' (found 2026-11-23: 26/4,431 rows). Capturing
+  // everything up to the row's first <br> and stripping tags handles any wrapper depth.
+  const statusCellMatch = chunk.match(/_lblStatus">([\s\S]*?)<br/);
+  const statusText = statusCellMatch
+    ? statusCellMatch[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim()
+    : "";
+  const status = statusText === "" ? null : statusText;
   const prMatch = chunk.match(/_lblPr">([^<]*)<br\s*\/?>\s*QTY:\s*(\d+)/);
   const issuedMatch = chunk.match(/_lblIssued"[^>]*>([^<]*)</);
   const returnByMatch = chunk.match(/_lblReturnBy"[^>]*>([^<]*)</);
@@ -95,7 +115,8 @@ export function parseRow(
   const nsnRaw = nsn;
   const nsnDigits = isRealNsn(nsn) ? nsn.replace(/\D/g, "") : null;
   const solicitationNumber = solMatch[2].trim();
-  const solicitationNumberRaw = solMatch[3].trim();
+  const hasAttachments = Boolean(solMatch[3]);
+  const solicitationNumberRaw = solMatch[4].trim();
   const documentUrl = solMatch[1].trim();
 
   const techDocsRaw = (techDocsMatch?.[1] ?? "").trim();
@@ -128,7 +149,8 @@ export function parseRow(
     solicitationNumber,
     solicitationNumberRaw,
     documentUrl,
-    status: (statusMatch?.[1] ?? "").trim(),
+    status,
+    hasAttachments,
     purchaseRequestNumber: prMatch?.[1]?.trim() || null,
     quantity: prMatch ? Number(prMatch[2]) : null,
     issuedDate: parseIsoDate(issuedMatch?.[1]),

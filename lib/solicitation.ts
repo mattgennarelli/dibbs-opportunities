@@ -17,7 +17,14 @@ export interface Solicitation {
   solicitationNumber: string;
   solicitationNumberRaw: string;
   documentUrl: string | null;
-  status: string;
+  // Free-text status label (e.g. "Open", "Removed"), or null when the cell's markup didn't
+  // match any known shape (never '' -- an empty string would wrongly imply "no status" was
+  // observed and parsed, rather than "parsing found nothing here").
+  status: string | null;
+  // True when the solicitation-number cell's own link includes a "--»Attachments" marker.
+  // Found 2026-11-23: some anchors wrap that marker inside a <br> after the number, which
+  // used to break the whole row's parse (see lib/parseRfqGrid.ts's solMatch regex comment).
+  hasAttachments: boolean;
   purchaseRequestNumber: string | null;
   quantity: number | null;
   issuedDate: string | null;
