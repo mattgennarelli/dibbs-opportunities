@@ -4,10 +4,17 @@
 // warning. No query params -- this reflects the ingest pipeline's own state, not anything
 // the caller filters.
 
-import { NextResponse } from "next/server";
+import { NextResponse, connection } from "next/server";
 import { sql } from "@/lib/db";
 
 export async function GET() {
+  // connection() opts this route into dynamic rendering under cacheComponents -- the
+  // Cache-Components-compatible replacement for `export const dynamic = "force-dynamic"`
+  // (which is explicitly rejected when cacheComponents is on). Without it, this handler has
+  // no request-based signal (no params, no request.url) so Next's static analysis treats it
+  // as prerenderable and actually RUNS it at build time, where DATABASE_URL isn't set.
+  await connection();
+
   const [lastRun] = await sql<
     { started_at: string; finished_at: string; status: string; error: string | null }[]
   >`

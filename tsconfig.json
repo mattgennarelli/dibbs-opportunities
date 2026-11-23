@@ -6,6 +6,11 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // scripts/ and tests/ import local modules with an explicit .ts extension (e.g.
+    // "../lib/db.ts") because that's what Node's own module resolution requires at runtime
+    // (node --experimental-strip-types) -- without this flag, `next build`'s own type-check
+    // step rejects every one of those imports (TS5097) and the production build fails.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

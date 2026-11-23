@@ -1,0 +1,55 @@
+name: Nightly ingest
+
+# Pulls the rolling 7-day window of DIBBS RFQ listings into Postgres. Runs twice a night so a
+# transient failure in the first run still gets a second chance before morning.
+#
+# Cron times are UTC and GitHub Actions cron does NOT shift for US daylight saving, so these
+# two fixed UTC times land on different ET clock times depending on the time of year:
+#   - "0 23 * * *" (23:00 UTC) = 6:00 PM ET during EST (UTC-5, roughly Nov-Mar),
+#                                 7:00 PM ET during EDT (UTC-4, roughly Mar-Nov)
+#   - "0 4  * * *" (04:00 UTC, i.e. the next calendar day) = 11:00 PM ET during EST,
+#                                 midnight ET during EDT
+# If exact ET wall-clock times ever matter more precisely than this, switch to a single
+# schedule plus an explicit TZ-aware check inside the job -- not attempted here since a ~1hr
+# seasonal drift twice a night is immaterial for a rolling 7-day catch-up window.
+on:
+  schedule:
+    - cron: "0 23 * * *"
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+# Only one ingest run at a time, repo-wide. A second run (whether the other schedule firing or
+# a manual dispatch) queues behind the first rather than running concurrently against the same
+# database rows.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      # No-op if migrations are already applied -- scripts/migrate.ts tracks applied migrations
+      # itself and only runs the ones that are new.
+      - run: npm run migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+
+      # No date argument -- defaults to the rolling 7-day window (see scripts/ingest.ts's
+      # header comment), so a day a prior run missed still gets caught up automatically.
+      - run: npm run ingest
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}

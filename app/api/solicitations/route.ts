@@ -13,7 +13,7 @@
 //   paginated within the top 200 candidates; `dir` is ignored. See lib/apiQuery.ts's header
 //   comments for why these two need genuinely different cursor shapes.
 
-import { NextResponse } from "next/server";
+import { NextResponse, connection } from "next/server";
 import { sql } from "@/lib/db";
 import { dbRowToSolicitation, type SolicitationDbRow } from "@/lib/dbRow";
 import {
@@ -44,31 +44,42 @@ import {
 // flags a sibling that's actually part of the CURRENT result set's universe (open, not
 // closed/removed) -- a closed FAT line shouldn't make an otherwise-unrelated open row show
 // a "First Article" flag for a test that's no longer relevant.
-const ROW_COLUMNS = sql`
-  nsn, nsn_raw, nsn_digits, nomenclature, technical_documents,
-  solicitation_number, solicitation_number_raw, document_url, status,
-  has_attachments, purchase_request_number, quantity,
-  issued_date::text, return_by_date::text, badges, package_view_url,
-  source_date::text, fetched_at::text, fsc, solicitation_type,
-  (first_seen_at > now() - interval '24 hours') AS is_new,
-  ${IS_FIRST_ARTICLE_SQL(sql)} AS is_first_article,
-  EXISTS (
-    SELECT 1 FROM open_solicitations s2
-    WHERE s2.solicitation_number_raw = open_solicitations.solicitation_number_raw
-      AND s2.id != open_solicitations.id
-      AND (s2.nsn_digits IS NULL AND s2.nomenclature LIKE 'GOVERNMENT FIRST ART%')
-  ) AS has_first_article_sibling
-`;
+//
+// Built inside the handler (per request), not at module scope: `sql` is a lazily-initialized
+// Proxy (see lib/db.ts) specifically so importing this route never touches Postgres -- even
+// just constructing a tagged-template query fragment at module scope would call through the
+// Proxy immediately on import, defeating that.
+function rowColumns() {
+  return sql`
+    nsn, nsn_raw, nsn_digits, nomenclature, technical_documents,
+    solicitation_number, solicitation_number_raw, document_url, status,
+    has_attachments, purchase_request_number, quantity,
+    issued_date::text, return_by_date::text, badges, package_view_url,
+    source_date::text, fetched_at::text, fsc, solicitation_type,
+    (first_seen_at > now() - interval '24 hours') AS is_new,
+    ${IS_FIRST_ARTICLE_SQL(sql)} AS is_first_article,
+    EXISTS (
+      SELECT 1 FROM open_solicitations s2
+      WHERE s2.solicitation_number_raw = open_solicitations.solicitation_number_raw
+        AND s2.id != open_solicitations.id
+        AND (s2.nsn_digits IS NULL AND s2.nomenclature LIKE 'GOVERNMENT FIRST ART%')
+    ) AS has_first_article_sibling
+  `;
+}
 
 const SEARCH_CAP = 200;
 
 export async function GET(request: Request) {
+  // Explicit dynamic opt-in (see app/api/ingest-status/route.ts's comment) -- reading
+  // request.url below already implies this, but that's a Next heuristic, not a guarantee.
+  await connection();
   const { searchParams } = new URL(request.url);
   const parsed = QuerySchema.safeParse(rawQueryFromSearchParams(searchParams));
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid query parameters", details: parsed.error.flatten() }, { status: 400 });
   }
   const query = parsed.data;
+  const ROW_COLUMNS = rowColumns();
 
   let cursor: BrowseCursor | SearchCursor | null = null;
   if (query.cursor !== undefined) {

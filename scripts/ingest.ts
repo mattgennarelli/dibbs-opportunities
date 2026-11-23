@@ -148,8 +148,11 @@ async function main() {
     console.log(`  errors: ${result.errors.length ? result.errors.join(" | ") : "none"}`);
     console.log(`  wrote: ${outPath}`);
 
+    // "partial" (e.g. a completeness-check mismatch) is logged and recorded in ingest_runs,
+    // but must NOT fail the run -- only a hard "failed" date (fetchDay threw, handled in the
+    // catch block above) sets a non-zero exit code, so a nightly Action run only shows red for
+    // an actual hard failure, not a day that came back merely incomplete.
     if (result.status === "partial" && overallStatus === "complete") overallStatus = "partial";
-    if (result.errors.length > 0) process.exitCode = 1;
 
     // DB write is additive to the JSON file, not a replacement for it yet -- skips gracefully
     // (not a failure) when DATABASE_URL isn't configured, so ingest still works without Postgres.

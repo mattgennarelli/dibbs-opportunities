@@ -9,12 +9,15 @@
 // apply to a facet listing), validated by the same QuerySchema so "what counts as a match"
 // can never disagree between the two routes.
 
-import { NextResponse } from "next/server";
+import { NextResponse, connection } from "next/server";
 import { sql } from "@/lib/db";
 import { QuerySchema, rawQueryFromSearchParams, buildFilterConditions, fscCondition, postedCondition, firstArticleCondition, SET_ASIDE_VALUES } from "@/lib/apiQuery";
 
 
 export async function GET(request: Request) {
+  // Explicit dynamic opt-in (see app/api/ingest-status/route.ts's comment) -- reading
+  // request.url below already implies this, but that's a Next heuristic, not a guarantee.
+  await connection();
   const { searchParams } = new URL(request.url);
   const parsed = QuerySchema.safeParse(rawQueryFromSearchParams(searchParams));
   if (!parsed.success) {
