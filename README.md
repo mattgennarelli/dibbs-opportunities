@@ -4,7 +4,7 @@ A production-shaped vendor view of open DLA DIBBS RFQs (government solicitations
 distributors and manufacturers) — reliable ingest, a real Postgres-backed API, and a fast,
 filterable table, instead of the original take-home's client-side JSON pass-through.
 
-**Live:** _TBD — not yet deployed to Vercel._
+**Live:** https://dibbs-opportunities.vercel.app/
 **Original interview submission:** [`v1-interview-submission`](../../tree/v1-interview-submission) ·
 [diff against this version](../../compare/v1-interview-submission...main)
 
