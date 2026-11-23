@@ -22,6 +22,15 @@ function parseIsoDate(mmddyyyy: string | undefined | null): string | null {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// DIBBS formats a real NSN as NNNN-NN-NNN-NNNN (13 digits with dashes). Some rows -- e.g.
+// "First Article" line items -- show a reference number in that cell instead (seen live:
+// "0001S00000053"), which is not an NSN and must not be treated as one.
+const NSN_PATTERN = /^\d{4}-\d{2}-\d{3}-\d{4}$/;
+
+function isRealNsn(nsn: string): boolean {
+  return NSN_PATTERN.test(nsn);
+}
+
 function deriveFsc(nsnDigits: string): string {
   return nsnDigits.slice(0, 4);
 }
@@ -83,7 +92,8 @@ export function parseRow(
   if (!nsnMatch || !solMatch) return null;
 
   const nsn = nsnMatch[1].trim();
-  const nsnDigits = nsn.replace(/\D/g, "");
+  const nsnRaw = nsn;
+  const nsnDigits = isRealNsn(nsn) ? nsn.replace(/\D/g, "") : null;
   const solicitationNumber = solMatch[2].trim();
   const solicitationNumberRaw = solMatch[3].trim();
   const documentUrl = solMatch[1].trim();
@@ -111,6 +121,7 @@ export function parseRow(
 
   return {
     nsn,
+    nsnRaw,
     nsnDigits,
     nomenclature: (nomMatch?.[1] ?? "").trim(),
     technicalDocuments,
@@ -126,7 +137,7 @@ export function parseRow(
     packageViewUrl: `${base}/rfq/rfqrec.aspx?sn=${solicitationNumberRaw}`,
     sourceDate,
     fetchedAt,
-    fsc: deriveFsc(nsnDigits),
+    fsc: nsnDigits !== null ? deriveFsc(nsnDigits) : null,
     solicitationType: deriveSolicitationType(solicitationNumberRaw),
   };
 }
@@ -140,5 +151,5 @@ export function findGridHtml(html: string): string | null {
 // Composite key identifying a row regardless of which fetcher produced it. Used to detect
 // a pagination stall (same rows served again under a different page number).
 export function rowKey(row: Solicitation): string {
-  return `${row.solicitationNumberRaw}|${row.nsnDigits}|${row.purchaseRequestNumber ?? ""}`;
+  return `${row.solicitationNumberRaw}|${row.nsnDigits ?? row.nsnRaw}|${row.purchaseRequestNumber ?? ""}`;
 }

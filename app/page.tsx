@@ -80,7 +80,7 @@ function dedupeExactRows(rows: Solicitation[]): Solicitation[] {
 }
 
 function rowKey(row: Solicitation, index: number): string {
-  return `${row.solicitationNumberRaw}__${row.nsnDigits}__${row.purchaseRequestNumber ?? "noPr"}__${index}`;
+  return `${row.solicitationNumberRaw}__${row.nsnDigits ?? row.nsnRaw}__${row.purchaseRequestNumber ?? "noPr"}__${index}`;
 }
 
 function Badges({ badges }: { badges: Badge[] }) {
@@ -135,6 +135,7 @@ export default function Home() {
   const fscOptions = useMemo(() => {
     const counts = new Map<string, number>();
     for (const row of dedupedRows) {
+      if (row.fsc === null) continue; // not a real NSN -- no FSC to filter by
       counts.set(row.fsc, (counts.get(row.fsc) ?? 0) + 1);
     }
     return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -374,7 +375,9 @@ export default function Home() {
                     >
                       <td className="whitespace-nowrap px-3 py-2">
                         <div className="font-mono">{row.nsn}</div>
-                        <div className="text-xs text-zinc-500 dark:text-zinc-500">FSC {row.fsc}</div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-500">
+                          {row.fsc !== null ? `FSC ${row.fsc}` : "Not an NSN"}
+                        </div>
                       </td>
                       <td className="px-3 py-2 max-w-[260px]">{cell(row.nomenclature)}</td>
                       <td className="whitespace-nowrap px-3 py-2 font-mono">

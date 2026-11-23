@@ -7,7 +7,11 @@ export type Badge = "fastAward" | "unrestricted" | "smallBusinessSetAside" | "ot
 
 export interface Solicitation {
   nsn: string;
-  nsnDigits: string;
+  // Raw text of the NSN/reference-number cell, always present. Some rows (e.g. "First
+  // Article" line items) show a reference number instead of a real 13-digit NSN -- for
+  // those, nsnDigits and fsc are null rather than derived from a value that isn't an NSN.
+  nsnRaw: string;
+  nsnDigits: string | null;
   nomenclature: string;
   technicalDocuments: "none" | "present" | null;
   solicitationNumber: string;
@@ -22,7 +26,7 @@ export interface Solicitation {
   packageViewUrl: string;
   sourceDate: string;
   fetchedAt: string;
-  fsc: string;
+  fsc: string | null;
   solicitationType: "automated" | "buyerGenerated" | "other" | null;
 }
 
