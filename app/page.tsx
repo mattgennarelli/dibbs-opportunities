@@ -7,7 +7,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Badge, Solicitation } from "@/lib/solicitation";
 import type { ApiSolicitation } from "@/lib/dbRow";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
-import { firstArticleRowLabel } from "@/lib/firstArticle";
+import { sublineLabel } from "@/lib/firstArticle";
 
 type BrowseSortKey = "deadline" | "quantity" | "issued" | "nsn";
 type SortValue = BrowseSortKey | "relevance";
@@ -52,6 +52,7 @@ const FAST_AWARD_STYLE = "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:tex
 const NEW_FLAG_STYLE = "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300";
 const STATUS_FLAG_STYLE = "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300";
 const FIRST_ARTICLE_FLAG_STYLE = "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300";
+const LOT_TESTING_FLAG_STYLE = "bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300";
 
 const SET_ASIDE_OPTIONS: { value: string; label: string }[] = [
   { value: "smallBusinessSetAside", label: "Small Business" },
@@ -130,6 +131,9 @@ interface FlagInfo {
 }
 
 function rowFlags(row: ApiSolicitation): FlagInfo[] {
+  // Sub-lines (First Article Test, Production Lot Testing, or any other non-catalog line
+  // item nested under a real-NSN parent) carry no flags at all -- the parent carries them.
+  if (row.isSubline) return [];
   const flags: FlagInfo[] = [];
   for (const badge of row.badges) {
     const label = BADGE_FLAG_LABELS[badge];
@@ -137,10 +141,8 @@ function rowFlags(row: ApiSolicitation): FlagInfo[] {
   }
   if (row.isNew) flags.push({ label: "New", style: NEW_FLAG_STYLE });
   if (row.status !== null && row.status !== "Open") flags.push({ label: row.status, style: STATUS_FLAG_STYLE });
-  // Guard on !isFirstArticle: hasFirstArticleSibling is computed self-inclusively at the SQL
-  // layer (see lib/apiQuery.ts's hasFirstArticleLineSql) so an orphan FA row would otherwise
-  // show this flag on ITSELF -- the flag belongs on the parent, never on an FA line.
-  if (!row.isFirstArticle && row.hasFirstArticleSibling) flags.push({ label: "First Article", style: FIRST_ARTICLE_FLAG_STYLE });
+  if (row.hasFirstArticleSibling) flags.push({ label: "First Article", style: FIRST_ARTICLE_FLAG_STYLE });
+  if (row.hasLotTestingSibling) flags.push({ label: "Lot Testing", style: LOT_TESTING_FLAG_STYLE });
   return flags;
 }
 
@@ -427,7 +429,7 @@ function SolicitationsPage() {
   // app/api/solicitations/route.ts's parentRowCondition), so X must match -- nested FA
   // children and orphans are extra rendered rows, not extra loaded results, and must not
   // inflate this count above the total they're drawn from.
-  const loadedParentCount = useMemo(() => rows.filter((r) => !r.isFirstArticle).length, [rows]);
+  const loadedParentCount = useMemo(() => rows.filter((r) => !r.isSubline).length, [rows]);
   const total = data?.pages[0]?.total ?? 0;
   const capped = sort === "relevance" && (data?.pages[0]?.capped ?? false);
 
@@ -738,13 +740,11 @@ function SolicitationsPage() {
                     }}
                     className="grid cursor-pointer items-center gap-3 border-t border-zinc-200 px-3 py-1.5 odd:bg-white even:bg-zinc-50 hover:bg-zinc-100 dark:border-zinc-800 dark:odd:bg-zinc-950 dark:even:bg-black dark:hover:bg-zinc-900"
                   >
-                    {row.isFirstArticle ? (
+                    {row.isSubline ? (
                       <>
                         <div />
-                        <div
-                          className={`truncate text-sm text-zinc-500 dark:text-zinc-400 ${row.isOrphanFirstArticle ? "" : "pl-4"}`}
-                        >
-                          {firstArticleRowLabel(row.nomenclature, row.isOrphanFirstArticle)}
+                        <div className="truncate pl-4 text-sm text-zinc-500 dark:text-zinc-400">
+                          {sublineLabel(row.nomenclature, row.isFirstArticle)}
                         </div>
                       </>
                     ) : (
@@ -770,7 +770,7 @@ function SolicitationsPage() {
                         {row.purchaseRequestNumber ? ` · PR ${row.purchaseRequestNumber}` : ""}
                       </div>
                     </div>
-                    <div className="text-sm">{row.isFirstArticle ? "" : cell(row.quantity)}</div>
+                    <div className="text-sm">{row.isSubline ? "" : cell(row.quantity)}</div>
                     <div className="text-sm">
                       {cell(row.returnByDate)}
                       {row.returnByDate && (
@@ -792,7 +792,7 @@ function SolicitationsPage() {
                       <Flags flags={rowFlags(row)} />
                     </div>
                     <div className="flex justify-center">
-                      {row.technicalDocuments === "present" ? (
+                      {!row.isSubline && row.technicalDocuments === "present" ? (
                         <span
                           title="Drawings available on DIBBS (DIBBS account required)"
                           className="cursor-default text-sm text-zinc-500 no-underline dark:text-zinc-400"

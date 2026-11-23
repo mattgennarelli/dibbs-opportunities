@@ -30,19 +30,21 @@ export interface SolicitationDbRow {
   // Computed at query time (first_seen_at > now() - 24h), not a stored column -- a row's
   // "newness" changes on its own as time passes, independent of any re-ingest.
   is_new: boolean;
-  // All three computed at query time from nsn_digits/nomenclature/solicitation_number_raw --
-  // see lib/apiQuery.ts's IS_FIRST_ARTICLE_SQL, hasFirstArticleLineSql,
-  // hasNonFirstArticleParentSql.
-  is_first_article: boolean; // this row ITSELF is an FA (First Article Test) line item
+  // All four computed at query time from nsn_digits/nomenclature/solicitation_number_raw --
+  // see lib/apiQuery.ts's isSublineSql, IS_FIRST_ARTICLE_SQL, hasFirstArticleLineSql,
+  // IS_LOT_TESTING_SQL, hasLotTestingLineSql.
+  is_subline: boolean; // this row is a non-NSN row WITH a real-NSN sibling -- render nested, no flags/tech docs
+  is_first_article: boolean; // this row ITSELF is a First Article Test line item (labeling only)
   has_first_article_sibling: boolean; // (meaningful on a parent row) its solicitation has an FA line
-  is_orphan_first_article: boolean; // (meaningful on an FA row) no real-NSN parent exists for it
+  has_lot_testing_sibling: boolean; // (meaningful on a parent row) its solicitation has a Production Lot Testing line
 }
 
 export interface ApiSolicitation extends Solicitation {
   isNew: boolean;
+  isSubline: boolean;
   isFirstArticle: boolean;
   hasFirstArticleSibling: boolean;
-  isOrphanFirstArticle: boolean;
+  hasLotTestingSibling: boolean;
 }
 
 export function dbRowToSolicitation(row: SolicitationDbRow): ApiSolicitation {
@@ -68,8 +70,9 @@ export function dbRowToSolicitation(row: SolicitationDbRow): ApiSolicitation {
     fsc: row.fsc,
     solicitationType: row.solicitation_type as Solicitation["solicitationType"],
     isNew: row.is_new,
+    isSubline: row.is_subline,
     isFirstArticle: row.is_first_article,
     hasFirstArticleSibling: row.has_first_article_sibling,
-    isOrphanFirstArticle: row.is_orphan_first_article,
+    hasLotTestingSibling: row.has_lot_testing_sibling,
   };
 }

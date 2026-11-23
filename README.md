@@ -16,12 +16,12 @@ filterable table, instead of the original take-home's client-side JSON pass-thro
   prefix matching when the query looks like an NSN.
 - Filters: FSC, set-aside type, min quantity, "closing within N days," Fast Award, has tech
   docs — each with live counts.
-- **Flags**: new-in-24h, Fast Award, First Article Test.
-- **First Article Test (FA) nesting**: an FA line item (no real NSN, "GOVERNMENT FIRST
-  ARTIC..." or "CONTRACTOR FIRST ARTIC...") renders indented directly under its parent
-  real-NSN row, labeled with which variant it is — never as a standalone row competing with
-  real listings in search/filters/sort. A genuine orphan (an FA line with no parent anywhere)
-  is shown alone instead, clearly labeled "parent item not listed."
+- **Flags**: new-in-24h, Fast Award, First Article Test, Lot Testing.
+- **Sub-line nesting**: any non-NSN line item that belongs to a real-NSN solicitation (First
+  Article Test, Production Lot Testing, or any other non-catalog line) renders indented
+  directly under its parent, labeled with what it is — never as a standalone row competing
+  with real listings in search/filters/sort. A non-NSN line with no real-NSN sibling at all
+  (the only line item on its solicitation) stays an ordinary standalone row, same as today.
 - **Tech docs**: just says "On DIBBS" when present — never fetches or displays the documents
   themselves (per project rule; DIBBS requires its own login for those).
 - Sortable columns (deadline, quantity, issued date, FSC, NSN), each a real indexed sort, not
@@ -85,17 +85,26 @@ flowchart LR
 - **Default view is `posted=latest`** (today's posting date, by `MAX(source_date)`, not
   wall-clock "today") rather than "all open" — a vendor's first question is "what's new," and
   defaulting to everything open buries that under weeks of older listings.
-- **First Article (FA) line items never enter the main query** — the main rows/count/facets
-  query is always restricted to real-NSN/normal rows (`parentRowCondition`, see
-  [`lib/apiQuery.ts`](lib/apiQuery.ts)), so an FA line can't independently match search,
-  filters, sort, or pagination, and totals/facet counts never include them. Each page's FA
-  children are fetched in a second query, scoped to exactly that page's parent solicitation
-  numbers, and assembled server-side before the response goes out — a parent and its FA line
-  can never land on different pages. A genuine orphan (FA line with no real-NSN parent
-  anywhere) is fetched separately again and shown once, on the first page only. Both
-  supplementary queries correlate on `solicitation_number_raw`, which needed its own index
-  (migration [009](db/migrations/009_solicitation_number_raw_index.sql) — it wasn't indexed
-  before this feature existed).
+- **Sub-lines never enter the main query** — a "sub-line" is any non-NSN row that has a
+  real-NSN sibling on its solicitation (generalizes beyond First Article Test to Production
+  Lot Testing and any other non-catalog line item). The main rows/count/facets query is
+  always restricted to real-NSN rows plus genuinely standalone non-NSN rows
+  (`parentRowCondition`, see [`lib/apiQuery.ts`](lib/apiQuery.ts)), so a sub-line can't
+  independently match search, filters, sort, or pagination, and totals/facet counts never
+  include them. Each page's sub-lines are fetched in a second query, scoped to exactly that
+  page's parent solicitation numbers, and assembled server-side before the response goes out
+  — a parent and its sub-lines can never land on different pages. There's no separate
+  "orphan" query needed: a non-NSN row with no real-NSN sibling was never classified a
+  sub-line, so it just flows through the main query as an ordinary row. Two specific flags
+  are computed the same way, each its own `EXISTS` (self-inclusive, so a standalone line of
+  that kind still matches its own filter): **First Article** (`%FIRST ART%` in the
+  nomenclature) and **Lot Testing** (`%PRODUCTION LOT TEST%` — deliberately NOT matching
+  "PRODUCTION CONTROL TESTING," a distinct, unverified category that stays an unflagged
+  nested sub-line). Production Lot Testing (DLAD 46.291): a quality test of the production
+  lot before acceptance, priced as a separate CLIN, following First Article approval when
+  FAT applies. All of this correlates on `solicitation_number_raw`, which needed its own
+  index (migration [009](db/migrations/009_solicitation_number_raw_index.sql) — it wasn't
+  indexed before this feature existed).
 - **No caching layer yet** — not needed: the indexed queries above already return in
   low-single-digit milliseconds. The design for scale, when it is needed: tag cache entries by
   `(filters, sort, cursor)` and invalidate the whole tag set on every ingest write (not a TTL,
@@ -216,13 +225,10 @@ file's comment on why pooled connections can't run them).
   `quantity`/`issued`/`fsc`/`nsn` (all nullable); `deadline` already isn't nullable and
   doesn't have this problem. Not implemented — current depths are fast enough (worst case
   measured ~6ms) that this is a "when it matters more" optimization, not a correctness issue.
-- **A "Testing required" flag for `PRODUCTION LOT TESTING` / `PRODUCTION CONTROL TESTING`
-  lines**: these are real, distinct non-NSN line items (91 and 2 rows respectively, found
-  while auditing other non-NSN nomenclatures for the FA fix) that are NOT First Article Test
-  lines — they're left alone by the `%FIRST ART%` pattern and currently just render as
-  ordinary rows. They may be worth their own flag so a vendor can spot "this isn't a normal
-  catalog buy" the same way they now can for FA lines; not done here since it wasn't asked
-  for and needs its own confirmation of what these mean before adding UI for them.
+- **`PRODUCTION CONTROL TESTING` still has no flag** (2 rows) — unlike `PRODUCTION LOT
+  TESTING`, what this category actually represents hasn't been confirmed, so it deliberately
+  stays an unflagged, unlabeled-beyond-its-own-nomenclature nested sub-line rather than
+  guessing. Worth a flag once confirmed, same mechanism as Lot Testing.
 
 ## Known limitations
 
@@ -231,9 +237,9 @@ file's comment on why pooled connections can't run them).
 - The curl fetcher's pagination is confirmed broken (see Key decisions above) and is kept only
   as a fallback for the single-page case and the cheap date lookup — don't rely on it for a
   full day's results.
-- A "First Article" line item's `fsc` is still mechanically derived from the first 4 characters
-  of its non-NSN reference number, which is not a meaningful FSC — flagged in the UI by hiding
-  FSC on those rows, not fixed at the data layer.
+- A sub-line's `fsc` is still mechanically derived from the first 4 characters of its non-NSN
+  reference number, which is not a meaningful FSC — flagged in the UI by hiding FSC on those
+  rows, not fixed at the data layer.
 - No caching layer yet (see above) — fine at current scale, not yet needed.
 - Faceted search result count is capped at 200 candidates in `sort=relevance` mode; browsing
   (non-search) sorts are not capped.

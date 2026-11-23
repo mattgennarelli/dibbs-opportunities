@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import postgres from "postgres";
+import { LOT_TESTING_SUBSTRING } from "./firstArticle.ts";
 
 // z.coerce.boolean() treats ANY non-empty string -- including the literal string "false"
 // -- as true, which would silently invert a caller's ?fastAward=false into "on." Each
@@ -226,31 +227,68 @@ export function postedCondition(sql: postgres.Sql, posted: PostedValue): postgre
 
 export type FirstArticleValue = "include" | "exclude" | "only";
 
-// A First Article Test (FA) line item: a non-NSN row whose nomenclature marks it as the
-// testing step for a real-NSN line elsewhere in the same solicitation -- either the
-// "GOVERNMENT FIRST ARTIC[LE TEST]" or "CONTRACTOR FIRST ARTIC[LE TEST]" variant (both
+// A "sub-line": any row whose nsn is not a real 13-digit NSN AND whose solicitation has at
+// least one real-NSN row elsewhere. Generalizes what used to be "First Article Test (FA)
+// row" handling -- a solicitation can carry several different kinds of non-NSN line items
+// (First Article Test, Production Lot Testing, raw-stock material, ...), and ALL of them
+// need to travel with their real-NSN parent rather than compete with ordinary rows for
+// search/filters/sort/pagination. A non-NSN row with NO real-NSN sibling is NOT a sub-line
+// -- it's the only line item on its solicitation, so it stays an ordinary standalone row,
+// fully subject to filters/search like any other row (see parentRowCondition below).
+export function hasRealNsnSiblingSql(sql: postgres.Sql): postgres.Fragment {
+  return sql`EXISTS (
+    SELECT 1 FROM open_solicitations real_check
+    WHERE real_check.solicitation_number_raw = open_solicitations.solicitation_number_raw
+      AND real_check.nsn_digits IS NOT NULL
+  )`;
+}
+
+export function isSublineSql(sql: postgres.Sql): postgres.Fragment {
+  return sql`(nsn_digits IS NULL AND ${hasRealNsnSiblingSql(sql)})`;
+}
+
+// The main rows/count/facets query is restricted to this, always, regardless of
+// `firstArticle` mode: a sub-line never matches filters, search, sort, or pagination on its
+// own (it's fetched separately, per page, and nested under its parent). This is the one
+// condition that keeps totals and facet counts "parent/normal rows only." A standalone
+// non-NSN row (no real-NSN sibling) passes this and flows through the main query like any
+// other row -- see the module comment above.
+export function parentRowCondition(sql: postgres.Sql): postgres.Fragment {
+  return sql`NOT ${isSublineSql(sql)}`;
+}
+
+// A First Article Test (FA) line item specifically: a non-NSN row whose nomenclature marks
+// it as the testing step for a real-NSN line elsewhere in the same solicitation -- either
+// the "GOVERNMENT FIRST ARTIC[LE TEST]" or "CONTRACTOR FIRST ARTIC[LE TEST]" variant (both
 // truncated at the same width by DIBBS; confirmed live on SPE7L7-27-Q-0302, which has a
 // CONTRACTOR line). `%FIRST ART%` catches both without over-matching: queried every other
 // non-NSN nomenclature in the table (2026-11-23) and the only ones containing "FIRST ART"
-// are these two. Everything else non-NSN (raw-stock items like ANGLE/BEARING/BUSHING/SPRING,
-// plus distinct non-FA testing concepts: "PRODUCTION LOT TESTING", "PRODUCTION CONTROL
-// TESTING", "NON-NSN ITEM") is correctly left alone by this pattern. Kept as a single
-// literal fragment (not a function returning a boolean column) so the exact same text is
-// used everywhere it matters: here, and inside the two EXISTS subqueries below.
+// are these two. This is narrower than isSublineSql -- it drives the "First Article" PARENT
+// flag specifically, not which rows get nested (that's isSublineSql, for every sub-line kind).
 export const IS_FIRST_ARTICLE_SQL = (sql: postgres.Sql) =>
   sql`(nsn_digits IS NULL AND nomenclature LIKE '%FIRST ART%')`;
 
-// Every query that touches First Article status operates on `open_solicitations`
-// unaliased -- these two fragments rely on that: the bare column names inside each EXISTS
-// subquery (via IS_FIRST_ARTICLE_SQL) resolve to the subquery's OWN aliased copy of the
-// table (innermost scope wins in SQL), while `open_solicitations.solicitation_number_raw`
+// A Production Lot Testing line item: DLAD 46.291 -- a quality test of the production lot
+// before acceptance, priced as its own CLIN, following First Article approval when FAT
+// applies. Deliberately NOT matching "PRODUCTION CONTROL TESTING" -- queried live and
+// confirmed it's a distinct, unverified category (what it actually represents hasn't been
+// confirmed), so it stays a nested sub-line only, with no flag. `LOT_TESTING_SUBSTRING` is
+// shared with lib/firstArticle.ts's isLotTestingNomenclature so the SQL pattern and its pure
+// JS mirror (used in tests) can't silently drift apart.
+export const IS_LOT_TESTING_SQL = (sql: postgres.Sql) =>
+  sql`(nsn_digits IS NULL AND nomenclature LIKE ${"%" + LOT_TESTING_SUBSTRING + "%"})`;
+
+// Every query that touches these EXISTS fragments operates on `open_solicitations`
+// unaliased -- they rely on that: the bare column names inside each subquery (via
+// IS_FIRST_ARTICLE_SQL / IS_LOT_TESTING_SQL) resolve to the subquery's OWN aliased copy of
+// the table (innermost scope wins in SQL), while `open_solicitations.solicitation_number_raw`
 // explicitly reaches the outer row being evaluated. If a caller ever needs to run one of
 // these against an aliased copy of the table, these must be revisited.
 
 // EXISTS an FA line item anywhere on this row's solicitation. Deliberately self-inclusive:
-// an FA row's own existence satisfies this for ITSELF too. That's required for an orphan FA
-// row (no real-NSN parent) to still match firstArticle=only on its own -- see
-// parentRowCondition and the "orphan" handling in app/api/solicitations/route.ts.
+// an FA row's own existence satisfies this for ITSELF too -- a standalone FA-text row with
+// no real-NSN sibling (not a sub-line, just an ordinary row) still matches firstArticle=only
+// on its own merit.
 export function hasFirstArticleLineSql(sql: postgres.Sql): postgres.Fragment {
   return sql`EXISTS (
     SELECT 1 FROM open_solicitations fa_check
@@ -259,29 +297,19 @@ export function hasFirstArticleLineSql(sql: postgres.Sql): postgres.Fragment {
   )`;
 }
 
-// EXISTS a real-NSN (non-FA) row on this row's solicitation. Used to tell an FA row with a
-// real parent apart from an "orphan" FA row that has none.
-export function hasNonFirstArticleParentSql(sql: postgres.Sql): postgres.Fragment {
+// EXISTS a Production Lot Testing line item anywhere on this row's solicitation. Same
+// self-inclusive shape as hasFirstArticleLineSql, for the same reason. Drives the "Lot
+// Testing" parent flag only -- there's no lotTesting filter param (not asked for).
+export function hasLotTestingLineSql(sql: postgres.Sql): postgres.Fragment {
   return sql`EXISTS (
-    SELECT 1 FROM open_solicitations parent_check
-    WHERE parent_check.solicitation_number_raw = open_solicitations.solicitation_number_raw
-      AND NOT ${IS_FIRST_ARTICLE_SQL(sql)}
+    SELECT 1 FROM open_solicitations lot_check
+    WHERE lot_check.solicitation_number_raw = open_solicitations.solicitation_number_raw
+      AND ${IS_LOT_TESTING_SQL(sql)}
   )`;
 }
 
-// The main rows/count/facets query is restricted to this, always, regardless of
-// `firstArticle` mode: FA line items never match filters, search, sort, or pagination on
-// their own (they're fetched separately, per page, and nested under their parent -- or, for
-// a true orphan with no parent, fetched separately again and shown standalone). This is the
-// one condition that keeps totals and facet counts "parent/normal rows only."
-export function parentRowCondition(sql: postgres.Sql): postgres.Fragment {
-  return sql`NOT ${IS_FIRST_ARTICLE_SQL(sql)}`;
-}
-
 // Solicitation-level filter: does this solicitation have an FA line at all? Applied ON TOP
-// of parentRowCondition in the main query, so it's only ever evaluated for real-NSN rows
-// here (an orphan FA row's own "only"/"exclude" membership is decided separately, by
-// parentRowCondition's inverse, where it's fetched -- see app/api/solicitations/route.ts).
+// of parentRowCondition in the main query.
 export function firstArticleCondition(sql: postgres.Sql, mode: FirstArticleValue): postgres.Fragment {
   if (mode === "include") return sql`true`;
   const hasFaLine = hasFirstArticleLineSql(sql);

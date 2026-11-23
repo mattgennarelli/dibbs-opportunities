@@ -1,49 +1,66 @@
 # Notes
 
-## First Article (FA) handling: full fix design (2026-11-23)
+## Sub-line handling: full fix design, then generalized beyond First Article (2026-11-23)
 
-Earlier versions mixed FA line items (non-NSN rows marking a First Article Test step for a
-real-NSN line on the same solicitation) directly into the main rows query, nested client-side.
-Two real bugs followed from that: an FA row could independently match search/filters and show
-up as an unexplained standalone row, and a parent/FA pair could land on different pages of a
-cursor walk (they competed for the same `LIMIT`/keyset cursor as ordinary rows).
+Earlier versions mixed First Article Test (FA) line items (non-NSN rows marking the testing
+step for a real-NSN line on the same solicitation) directly into the main rows query, nested
+client-side. Two real bugs followed from that: an FA row could independently match
+search/filters and show up as an unexplained standalone row, and a parent/FA pair could land
+on different pages of a cursor walk (they competed for the same `LIMIT`/keyset cursor as
+ordinary rows).
 
-**Detection**: initially matched only `nomenclature LIKE 'GOVERNMENT FIRST ART%'`. Found live
-(SPE7L7-27-Q-0302) that a second variant exists -- "CONTRACTOR FIRST ARTIC" (DIBBS truncates
-both to the same column width). Queried every other non-NSN nomenclature in the table to make
-sure a broader `%FIRST ART%` pattern wouldn't over-match: it doesn't. See the README's Next
-Steps for the one other category found by that same query (`PRODUCTION LOT/CONTROL TESTING`),
-which is NOT First Article and is correctly left alone.
+**Detection (FA specifically)**: initially matched only `nomenclature LIKE 'GOVERNMENT FIRST
+ART%'`. Found live (SPE7L7-27-Q-0302) that a second variant exists -- "CONTRACTOR FIRST
+ARTIC" (DIBBS truncates both to the same column width). Queried every other non-NSN
+nomenclature in the table to make sure a broader `%FIRST ART%` pattern wouldn't over-match:
+it doesn't.
 
-**Design**: `IS_FIRST_ARTICLE_SQL` (`lib/apiQuery.ts`) is the single source of truth for "is
-this row an FA line," reused everywhere. Two correlated-EXISTS fragments build on it:
-- `hasFirstArticleLineSql` -- does this solicitation have an FA line at all? Deliberately
-  self-inclusive (an FA row's own existence satisfies this for itself) so a true orphan still
-  matches `firstArticle=only` on its own, with no separate orphan-specific filter condition
-  needed.
-- `hasNonFirstArticleParentSql` -- does this solicitation have a real-NSN row? Used only to
-  tell an FA row with a parent apart from an orphan.
+**Generalization to "sub-lines"**: that same query surfaced other non-NSN categories that
+aren't First Article at all -- `PRODUCTION LOT TESTING` (91 rows), `PRODUCTION CONTROL
+TESTING` (2 rows), `NON-NSN ITEM` (57 rows), plus assorted raw-stock items (ANGLE, BEARING,
+BUSHING, SPRING, ...). All of them have the exact same structural problem FA did: when they
+share a solicitation with a real-NSN row, they need to travel with it, not compete with it.
+The fix generalizes from "is this row an FA line" to "is this row a **sub-line**" -- any
+non-NSN row (`nsn_digits IS NULL`) that has a real-NSN sibling on its solicitation
+(`hasRealNsnSiblingSql`, `isSublineSql` in `lib/apiQuery.ts`). A non-NSN row with NO real-NSN
+sibling (the only line item on its solicitation) is simply not a sub-line -- it stays an
+ordinary standalone row, fully subject to filters/search like any other row, which also
+retires the old "orphan FA" special case (separate query, first-page-only, "parent item not
+listed" label) entirely: there's no orphan case left to handle, because a truly parentless
+non-NSN row was never pulled out of the main query to begin with.
 
-`parentRowCondition` (`NOT IS_FIRST_ARTICLE_SQL`) is applied to the main
-rows/count/facets query, always, regardless of `firstArticle` mode -- this is what keeps FA
-rows out of search/filter/sort/pagination entirely, and keeps totals/facet counts
-"parent rows only" as specified. Two supplementary queries, run per request inside the same
-transaction: FA children, scoped by `solicitation_number_raw = ANY(<this page's parent
-solicitation numbers>)` (so a parent and its child always arrive in the same HTTP response,
-never split across a cursor walk); and orphans, scoped by "no real-NSN parent exists,"
-fetched only on the first page of a request (cursor null / offset 0) since they aren't
-paginated at all -- fetching them on every page would repeat the same orphans on every page
-of a cursor walk. Both are assembled into the final row list server-side
-(`lib/firstArticle.ts`'s `withFirstArticlesAssembled`), which is also why it's a plain
-function with no SQL dependency -- fully unit-testable, see `tests/firstArticle.test.ts`.
+**Design**: `parentRowCondition` (`NOT isSublineSql`) is applied to the main rows/count/facets
+query, always, regardless of `firstArticle` mode -- this is what keeps sub-lines out of
+search/filter/sort/pagination entirely, and keeps totals/facet counts "parent rows only." One
+supplementary query per request, scoped by `solicitation_number_raw = ANY(<this page's parent
+solicitation numbers>)` and `isSublineSql` (so a parent and ALL its sub-lines -- FA, Lot
+Testing, whatever else -- always arrive in the same HTTP response, never split across a
+cursor walk), fetches every sub-line kind at once. Assembled into the final row list
+server-side by `lib/firstArticle.ts`'s `withSublinesAssembled`, a plain function with no SQL
+dependency -- fully unit-testable, see `tests/firstArticle.test.ts`.
 
-Both EXISTS fragments correlate on `solicitation_number_raw`, which had no index before this
-feature -- added in migration `009_solicitation_number_raw_index.sql`.
+Two specific flags stay narrower than "is a sub-line," each its own self-inclusive EXISTS
+(so a standalone line of that kind still matches its own filter/flag on its own merit, no
+special-casing needed):
+- `IS_FIRST_ARTICLE_SQL` / `hasFirstArticleLineSql` -- unchanged from the original fix, drives
+  the "First Article" parent flag and the `firstArticle` include/exclude/only filter.
+- `IS_LOT_TESTING_SQL` / `hasLotTestingLineSql` -- added 2026-11-23, drives a new "Lot
+  Testing" parent flag (distinct color from First Article). Matches `%PRODUCTION LOT TEST%`
+  only -- deliberately NOT `PRODUCTION CONTROL TESTING`, which is a distinct, unverified
+  category (what it actually represents hasn't been confirmed) and stays an unflagged nested
+  sub-line. `LOT_TESTING_SUBSTRING` is exported from `lib/firstArticle.ts` and imported into
+  `lib/apiQuery.ts` so the SQL `LIKE` pattern and its pure-JS mirror
+  (`isLotTestingNomenclature`, used in tests) share one literal and can't drift apart.
+  Production Lot Testing is DLAD 46.291: a quality test of the production lot before
+  acceptance, priced as a separate CLIN, following First Article approval when FAT applies.
+  No new filter was added for it -- just the flag.
 
-**Known follow-up, not done here**: a `PRODUCTION LOT TESTING` / `PRODUCTION CONTROL TESTING`
-line (91 / 2 rows respectively) is a distinct non-NSN category, not First Article, and
-currently renders as an ordinary row with no special treatment. Flagged in the README's Next
-Steps as a possible future flag, pending confirmation of what these actually represent.
+All of these EXISTS fragments correlate on `solicitation_number_raw`, which had no index
+before this feature -- added in migration `009_solicitation_number_raw_index.sql`.
+
+**Known follow-up, not done here**: `PRODUCTION CONTROL TESTING` (2 rows) still has no flag,
+pending confirmation of what it actually represents -- same mechanism as Lot Testing would
+apply once that's known.
 
 ## Keyset vs. `OFFSET` pagination, measured head-to-head (2026-11-23)
 
