@@ -61,6 +61,31 @@ test("a normal row (no attachments marker, plain Open status) still parses the s
   assert.ok(row.badges.includes("fastAward"), "this row's fast-award icon should still be detected");
 });
 
+test("iconCFolder (Tech Docs icon, a different cell) is excluded from badges, and a set-aside icon (HUBZone) gets its own label instead of falling into 'other'", () => {
+  const chunk = loadFixture("row-with-cfolder-and-hubzone.html");
+  const diagnostics = freshDiagnostics();
+  const row = parseRow(chunk, SOURCE_DATE, FETCHED_AT, diagnostics, BASE);
+
+  assert.ok(row, "row should parse");
+  assert.ok(diagnostics.badgeFilenames.has("iconCFolder"), "the icon was seen in the HTML");
+  assert.ok(!row.badges.includes("other"), "iconCFolder must not produce an 'other' badge");
+  assert.ok(row.badges.includes("hubZone"), "HUBZone icon should map to its own label");
+  assert.equal(row.badges.length, 1, "only the real set-aside badge should remain, iconCFolder excluded entirely");
+});
+
+test("iconSb.gif (Small Business Set-Aside) maps to its own badge, not 'other'", () => {
+  // Found 2026-11-23: `\bsb\b` never matches inside the single unbroken token "iconSb" --
+  // \b needs a transition between a word char and a non-word char, and every character in
+  // "iconSb" is a word char, so this regex silently never matched the single most common
+  // set-aside icon on the site. Real row, real icon (alt="Small Business Set-Aside").
+  const chunk = loadFixture("row-with-iconsb.html");
+  const row = parseRow(chunk, SOURCE_DATE, FETCHED_AT, freshDiagnostics(), BASE);
+
+  assert.ok(row, "row should parse");
+  assert.ok(row.badges.includes("smallBusinessSetAside"), "iconSb should map to smallBusinessSetAside");
+  assert.ok(!row.badges.includes("other"), "iconSb must never fall through to 'other'");
+});
+
 test("a status cell that truly has no text (hypothetical: only markup, no words) would parse as null, never ''", () => {
   // Synthetic (not a captured real row) -- there's no live example of a status cell with
   // genuinely zero text, but the empty-string normalization logic needs its own direct check

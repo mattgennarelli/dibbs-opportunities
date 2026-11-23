@@ -27,9 +27,22 @@ export interface SolicitationDbRow {
   fetched_at: string;
   fsc: string | null;
   solicitation_type: string | null;
+  // Computed at query time (first_seen_at > now() - 24h), not a stored column -- a row's
+  // "newness" changes on its own as time passes, independent of any re-ingest.
+  is_new: boolean;
+  // Both computed at query time from nsn_digits/nomenclature/solicitation_number_raw -- see
+  // lib/apiQuery.ts's IS_FIRST_ARTICLE_SQL and app/api/solicitations/route.ts's EXISTS.
+  is_first_article: boolean;
+  has_first_article_sibling: boolean;
 }
 
-export function dbRowToSolicitation(row: SolicitationDbRow): Solicitation {
+export interface ApiSolicitation extends Solicitation {
+  isNew: boolean;
+  isFirstArticle: boolean;
+  hasFirstArticleSibling: boolean;
+}
+
+export function dbRowToSolicitation(row: SolicitationDbRow): ApiSolicitation {
   return {
     nsn: row.nsn,
     nsnRaw: row.nsn_raw,
@@ -51,5 +64,8 @@ export function dbRowToSolicitation(row: SolicitationDbRow): Solicitation {
     fetchedAt: row.fetched_at,
     fsc: row.fsc,
     solicitationType: row.solicitation_type as Solicitation["solicitationType"],
+    isNew: row.is_new,
+    isFirstArticle: row.is_first_article,
+    hasFirstArticleSibling: row.has_first_article_sibling,
   };
 }

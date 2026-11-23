@@ -11,16 +11,33 @@ import postgres from "postgres";
 // (including "True", "1", "yes") is a validation error, not a guess.
 const strictBoolean = () => z.stringbool({ truthy: ["true"], falsy: ["false"] }).optional();
 
+// The six set-aside/unrestricted badge values a row can be filtered by. Deliberately not
+// "fastAward" or "other" -- those aren't set-aside programs, so they're not part of this
+// filter's vocabulary even though they're also Badge values.
+export const SET_ASIDE_VALUES = ["smallBusinessSetAside", "hubZone", "eightA", "sdvosb", "wosb", "unrestricted"] as const;
+export type SetAsideValue = (typeof SET_ASIDE_VALUES)[number];
+
 export const QuerySchema = z
   .object({
     q: z.string().trim().min(1).optional(),
     fsc: z.array(z.string().regex(/^\d{4}$/, "fsc must be a 4-digit code")).optional(),
     fastAward: strictBoolean(),
-    smallBusiness: strictBoolean(),
+    // Rows match ANY selected value (OR, not AND) -- see buildFilterConditions's `&&` below.
+    setAside: z.array(z.enum(SET_ASIDE_VALUES)).optional(),
     techDocs: strictBoolean(),
     minQty: z.coerce.number().int().nonnegative().optional(),
     closingWithinDays: z.coerce.number().int().nonnegative().optional(),
-    sort: z.enum(["deadline", "quantity", "issued", "relevance"]).default("deadline"),
+    // How recently a row's source_date must be, relative to MAX(source_date) across the
+    // whole table -- not wall-clock "today," so this stays meaningful even if ingest has
+    // fallen behind. "latest" = just the single most recent posting date.
+    posted: z.enum(["latest", "3d", "7d", "all"]).default("latest"),
+    // First Article Test line items (non-NSN rows for the testing step of a solicitation
+    // that already has a real-NSN line) -- lets a vendor hide the noise or isolate them.
+    firstArticle: z.enum(["include", "exclude", "only"]).default("include"),
+    sort: z.enum(["deadline", "quantity", "issued", "fsc", "nsn", "relevance"]).default("deadline"),
+    // Ignored in sort=relevance (match-quality order has no "direction"); applies to every
+    // browse-mode sort key.
+    dir: z.enum(["asc", "desc"]).default("asc"),
     cursor: z.string().optional(),
     limit: z.coerce.number().int().positive().max(100).default(50),
   })
@@ -37,15 +54,19 @@ export type Query = z.infer<typeof QuerySchema>;
 // returns null for an absent key, which zod's .optional() doesn't accept -- undefined does.
 export function rawQueryFromSearchParams(searchParams: URLSearchParams): Record<string, unknown> {
   const fsc = searchParams.getAll("fsc");
+  const setAside = searchParams.getAll("setAside");
   return {
     q: searchParams.get("q") ?? undefined,
     fsc: fsc.length > 0 ? fsc : undefined,
     fastAward: searchParams.get("fastAward") ?? undefined,
-    smallBusiness: searchParams.get("smallBusiness") ?? undefined,
+    setAside: setAside.length > 0 ? setAside : undefined,
     techDocs: searchParams.get("techDocs") ?? undefined,
     minQty: searchParams.get("minQty") ?? undefined,
     closingWithinDays: searchParams.get("closingWithinDays") ?? undefined,
+    posted: searchParams.get("posted") ?? undefined,
+    firstArticle: searchParams.get("firstArticle") ?? undefined,
     sort: searchParams.get("sort") ?? undefined,
+    dir: searchParams.get("dir") ?? undefined,
     cursor: searchParams.get("cursor") ?? undefined,
     limit: searchParams.get("limit") ?? undefined,
   };
@@ -62,13 +83,16 @@ export function isNsnLooking(q: string): boolean {
 // the view's own WHERE already excludes NULLs for -- see db/migrations/001_init.sql);
 // `nullable: true` here is what tells the keyset/order-by builders below to handle that.
 export const BROWSE_SORT_SPECS = {
-  deadline: { column: "return_by_date", nullable: false },
-  quantity: { column: "quantity", nullable: true },
-  issued: { column: "issued_date", nullable: true },
+  deadline: { column: "return_by_date", nullable: false, cast: "date" },
+  quantity: { column: "quantity", nullable: true, cast: "int" },
+  issued: { column: "issued_date", nullable: true, cast: "date" },
+  fsc: { column: "fsc", nullable: true, cast: "text" },
+  nsn: { column: "nsn_digits", nullable: true, cast: "text" },
 } as const;
 export type BrowseSortKey = keyof typeof BROWSE_SORT_SPECS;
+export type SortDir = "asc" | "desc";
 
-export type BrowseCursor = { type: "browse"; sortKey: BrowseSortKey; v: string | number | null; id: number };
+export type BrowseCursor = { type: "browse"; sortKey: BrowseSortKey; dir: SortDir; v: string | number | null; id: number };
 export type SearchCursor = { type: "search"; offset: number };
 
 export function encodeCursor(cursor: BrowseCursor | SearchCursor): string {
@@ -83,6 +107,7 @@ export function decodeCursor(raw: string): BrowseCursor | SearchCursor | null {
     if (
       parsed?.type === "browse" &&
       parsed.sortKey in BROWSE_SORT_SPECS &&
+      (parsed.dir === "asc" || parsed.dir === "desc") &&
       (typeof parsed.v === "string" || typeof parsed.v === "number" || parsed.v === null) &&
       typeof parsed.id === "number"
     ) {
@@ -97,40 +122,38 @@ export function decodeCursor(raw: string): BrowseCursor | SearchCursor | null {
   }
 }
 
-// ORDER BY for a given browse sort key. NULLS LAST is an explicit, documented choice (not
-// Postgres's default for ASC, which is NULLS LAST too as it happens, but spelled out here
-// so it doesn't depend on that default never changing): a solicitation missing a quantity
-// or issued date shouldn't crowd the front of a "sort by quantity"/"sort by issued" list.
-export function browseOrderBy(sql: postgres.Sql, sortKey: BrowseSortKey): postgres.Fragment {
-  switch (sortKey) {
-    case "deadline":
-      return sql`return_by_date ASC, id ASC`;
-    case "quantity":
-      return sql`quantity ASC NULLS LAST, id ASC`;
-    case "issued":
-      return sql`issued_date ASC NULLS LAST, id ASC`;
+// ORDER BY for a given browse sort key + direction. NULLS LAST regardless of direction is an
+// explicit, documented choice: a solicitation missing a quantity/issued/FSC/NSN value should
+// stay anchored at the end of the list rather than jumping to the front when the column
+// header's direction is toggled. DESC needs no separate index -- Postgres reads a btree
+// index backward natively, so the same (column, id) index serves both directions.
+export function browseOrderBy(sql: postgres.Sql, sortKey: BrowseSortKey, dir: SortDir): postgres.Fragment {
+  const column = BROWSE_SORT_SPECS[sortKey].column;
+  if (dir === "desc") {
+    return sql`${sql.unsafe(column)} DESC NULLS LAST, id DESC`;
   }
+  return sql`${sql.unsafe(column)} ASC NULLS LAST, id ASC`;
 }
 
-// Keyset predicate for resuming a browse-mode page. `cursor` is null on the first page
-// (no predicate needed). For a nullable sort column, resuming from a non-null cursor value
-// must also include every NULL row (NULLS LAST means they all sort after every real value,
-// not just after ones greater than the cursor); resuming from a null cursor value means
-// "already inside the NULL group," where only the id tie-break still applies.
+// Keyset predicate for resuming a browse-mode page. `cursor` is null on the first page (no
+// predicate needed). NULLS LAST means a null-valued row sorts after every real value in
+// EITHER direction, so: resuming from a non-null cursor must also include every NULL row
+// (not just ones that compare past the cursor); resuming from a null cursor value means
+// "already inside the NULL group," where only the id tie-break (direction-sensitive) applies.
 export function browseKeysetCondition(sql: postgres.Sql, sortKey: BrowseSortKey, cursor: BrowseCursor | null): postgres.Fragment {
   if (!cursor) return sql`true`;
-  switch (sortKey) {
-    case "deadline":
-      return sql`(return_by_date, id) > (${cursor.v}::date, ${cursor.id}::bigint)`;
-    case "quantity":
-      return cursor.v === null
-        ? sql`quantity IS NULL AND id > ${cursor.id}::bigint`
-        : sql`(quantity IS NULL OR (quantity, id) > (${cursor.v}::int, ${cursor.id}::bigint))`;
-    case "issued":
-      return cursor.v === null
-        ? sql`issued_date IS NULL AND id > ${cursor.id}::bigint`
-        : sql`(issued_date IS NULL OR (issued_date, id) > (${cursor.v}::date, ${cursor.id}::bigint))`;
+  const spec = BROWSE_SORT_SPECS[sortKey];
+  const column = sql.unsafe(spec.column);
+  const idOp = cursor.dir === "desc" ? sql`<` : sql`>`;
+  if (!spec.nullable) {
+    const tupleOp = cursor.dir === "desc" ? sql`<` : sql`>`;
+    return sql`(${column}, id) ${tupleOp} (${cursor.v}::${sql.unsafe(spec.cast)}, ${cursor.id}::bigint)`;
   }
+  if (cursor.v === null) {
+    return sql`${column} IS NULL AND id ${idOp} ${cursor.id}::bigint`;
+  }
+  const tupleOp = cursor.dir === "desc" ? sql`<` : sql`>`;
+  return sql`(${column} IS NULL OR (${column}, id) ${tupleOp} (${cursor.v}::${sql.unsafe(spec.cast)}, ${cursor.id}::bigint))`;
 }
 
 // Fragments are combined by nesting one sql`` template inside another (postgres.js supports
@@ -144,7 +167,10 @@ function joinWithAnd(sql: postgres.Sql, conditions: postgres.Fragment[]): postgr
 export interface Filters {
   q?: string;
   fastAward?: boolean;
-  smallBusiness?: boolean;
+  // Rows match ANY of these (OR semantics -- the array-overlap `&&` operator below), not
+  // all of them -- a row tagged just "hubZone" still matches a filter for
+  // ["hubZone", "wosb"].
+  setAside?: SetAsideValue[];
   techDocs?: boolean;
   minQty?: number;
   closingWithinDays?: number;
@@ -162,7 +188,7 @@ export interface Filters {
 export function buildFilterConditions(sql: postgres.Sql, f: Filters): postgres.Fragment {
   const conditions: postgres.Fragment[] = [];
   if (f.fastAward) conditions.push(sql`badges @> ARRAY['fastAward']`);
-  if (f.smallBusiness) conditions.push(sql`badges @> ARRAY['smallBusinessSetAside']`);
+  if (f.setAside && f.setAside.length > 0) conditions.push(sql`badges && ${f.setAside}::text[]`);
   if (f.techDocs) conditions.push(sql`technical_documents = 'present'`);
   if (f.minQty !== undefined) conditions.push(sql`quantity >= ${f.minQty}::int`);
   if (f.closingWithinDays !== undefined) {
@@ -185,4 +211,31 @@ export function buildFilterConditions(sql: postgres.Sql, f: Filters): postgres.F
 
 export function fscCondition(sql: postgres.Sql, fsc?: string[]) {
   return fsc && fsc.length > 0 ? sql`fsc = ANY(${fsc}::text[])` : sql`true`;
+}
+
+export type PostedValue = "latest" | "3d" | "7d" | "all";
+
+// "latest"/"3d"/"7d" are relative to MAX(source_date) in the WHOLE solicitations table, not
+// wall-clock "today" -- if ingest hasn't run in a while, "latest" should still mean "the most
+// recent day we actually have," not silently return nothing because today > any source_date.
+export function postedCondition(sql: postgres.Sql, posted: PostedValue): postgres.Fragment {
+  if (posted === "all") return sql`true`;
+  const daysBack = posted === "latest" ? 0 : posted === "3d" ? 2 : 6;
+  return sql`source_date >= (SELECT MAX(source_date) FROM solicitations) - ${daysBack}::int`;
+}
+
+export type FirstArticleValue = "include" | "exclude" | "only";
+
+// A First Article Test line item: a non-NSN row whose nomenclature marks it as the testing
+// step for a real-NSN line elsewhere in the same solicitation. Kept as a single literal
+// fragment (not a function returning a boolean column) so the exact same text is used
+// everywhere it matters: here, in is_first_article (SELECT), and in has_first_article_sibling
+// (the correlated EXISTS) -- see app/api/solicitations/route.ts.
+export const IS_FIRST_ARTICLE_SQL = (sql: postgres.Sql) =>
+  sql`(nsn_digits IS NULL AND nomenclature LIKE 'GOVERNMENT FIRST ART%')`;
+
+export function firstArticleCondition(sql: postgres.Sql, mode: FirstArticleValue): postgres.Fragment {
+  if (mode === "include") return sql`true`;
+  const isFat = IS_FIRST_ARTICLE_SQL(sql);
+  return mode === "exclude" ? sql`NOT ${isFat}` : isFat;
 }

@@ -47,7 +47,16 @@ function badgeFromIconFilename(filename: string): Badge {
   const lower = filename.toLowerCase();
   if (lower.includes("fastpace")) return "fastAward";
   if (lower.includes("unrestrictednotsetaside")) return "unrestricted";
-  if (/\bsb\b/i.test(filename) || lower.includes("setaside")) return "smallBusinessSetAside";
+  if (lower.includes("hubzone")) return "hubZone";
+  if (lower.includes("sdvosb")) return "sdvosb";
+  if (lower.includes("wosb")) return "wosb";
+  if (/^icon8a$/i.test(filename)) return "eightA";
+  // Found 2026-11-23: `\bsb\b` never matched "iconSb" -- "Sb" has no word-boundary inside
+  // one unbroken token, so iconSb.gif (alt="Small Business Set-Aside") fell through to
+  // "other" for every row that had it. Exact match instead, now that hubZone/sdvosb/wosb/
+  // eightA are already handled above (iconSdvosb also contains "sb" as a substring, so a
+  // bare `.includes("sb")` would still be wrong -- this has to be the full filename).
+  if (/^iconsb$/i.test(filename) || lower.includes("setaside")) return "smallBusinessSetAside";
   return "other";
 }
 
@@ -136,7 +145,11 @@ export function parseRow(
   while ((iconMatch = badgeIconRe.exec(chunk))) {
     const filename = iconMatch[1];
     diagnostics.badgeFilenames.add(filename);
-    if (filename === "iconSpace1010") continue; // decorative spacer, not a real badge
+    // iconSpace1010: a 10x10 invisible spacer gif, pure layout, not a badge. iconCFolder:
+    // the Tech Docs folder icon from a DIFFERENT cell -- the badge scan isn't scoped to just
+    // the solicitation-number cell, so it was picking this up too (found 2026-11-23, filed
+    // under "other"). Neither is a procurement badge.
+    if (filename === "iconSpace1010" || filename === "iconCFolder") continue;
     badges.push(badgeFromIconFilename(filename));
   }
 

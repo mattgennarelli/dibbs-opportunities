@@ -3,7 +3,19 @@
 // Every field here is either a real scraped column, or a derived field computed only from
 // real columns (fsc, solicitationType) per the project's correctness rule: never invent values.
 
-export type Badge = "fastAward" | "unrestricted" | "smallBusinessSetAside" | "other";
+// hubZone/eightA/sdvosb/wosb were added 2026-11-23: previously these icons all fell through
+// to "other" (see lib/parseRfqGrid.ts's badgeFromIconFilename), which was itself hiding a
+// real bug -- the Tech Docs folder icon (iconCFolder) was being swept into badges at all,
+// not just these four legitimate set-aside programs lacking their own label.
+export type Badge =
+  | "fastAward"
+  | "unrestricted"
+  | "smallBusinessSetAside"
+  | "hubZone"
+  | "eightA"
+  | "sdvosb"
+  | "wosb"
+  | "other";
 
 export interface Solicitation {
   nsn: string;
