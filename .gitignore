@@ -45,3 +45,4 @@ next-env.d.ts
 data/solicitations.json
 data/*.corrupt.json
 data/*.partial.json
+scratch/
