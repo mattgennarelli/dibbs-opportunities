@@ -11,7 +11,7 @@
 
 import { NextResponse, connection } from "next/server";
 import { sql } from "@/lib/db";
-import { QuerySchema, rawQueryFromSearchParams, buildFilterConditions, fscCondition, postedCondition, firstArticleCondition, SET_ASIDE_VALUES } from "@/lib/apiQuery";
+import { QuerySchema, rawQueryFromSearchParams, buildFilterConditions, fscCondition, postedCondition, firstArticleCondition, parentRowCondition, SET_ASIDE_VALUES } from "@/lib/apiQuery";
 
 
 export async function GET(request: Request) {
@@ -37,11 +37,13 @@ export async function GET(request: Request) {
   const { fscFacets, setAsideFacets } = await sql.begin(async (tx) => {
     await tx`SET LOCAL pg_trgm.word_similarity_threshold = 0.3`;
 
-    // fsc facet: every filter including setAside, fsc itself omitted.
+    // fsc facet: every filter including setAside, fsc itself omitted. parentRowCondition --
+    // FA/orphan rows never count toward facet counts (same rule as /api/solicitations' main
+    // query and total).
     const fscFacets = await tx<{ fsc: string; count: string }[]>`
       SELECT fsc, COUNT(*)::bigint AS count
       FROM open_solicitations
-      WHERE ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, filters)}
+      WHERE ${parentRowCondition(sql)} AND ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, filters)}
         AND fsc IS NOT NULL
       GROUP BY fsc
       ORDER BY fsc
@@ -56,7 +58,7 @@ export async function GET(request: Request) {
       LEFT JOIN (
         SELECT b AS value, COUNT(*)::bigint AS count
         FROM open_solicitations, unnest(badges) AS b
-        WHERE ${fscCondition(sql, query.fsc)} AND ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, { ...filters, setAside: undefined })}
+        WHERE ${parentRowCondition(sql)} AND ${fscCondition(sql, query.fsc)} AND ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, { ...filters, setAside: undefined })}
           AND b = ANY(${SET_ASIDE_VALUES}::text[])
         GROUP BY b
       ) counts ON counts.value = v.value

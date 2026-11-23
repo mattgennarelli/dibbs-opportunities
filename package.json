@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/parseRfqGrid.test.ts",
+    "test": "node --experimental-strip-types --test tests/parseRfqGrid.test.ts tests/firstArticle.test.ts",
     "ingest": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/ingest.ts",
     "migrate": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/migrate.ts"
   },

@@ -7,6 +7,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Badge, Solicitation } from "@/lib/solicitation";
 import type { ApiSolicitation } from "@/lib/dbRow";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { firstArticleRowLabel } from "@/lib/firstArticle";
 
 type BrowseSortKey = "deadline" | "quantity" | "issued" | "nsn";
 type SortValue = BrowseSortKey | "relevance";
@@ -136,37 +137,13 @@ function rowFlags(row: ApiSolicitation): FlagInfo[] {
   }
   if (row.isNew) flags.push({ label: "New", style: NEW_FLAG_STYLE });
   if (row.status !== null && row.status !== "Open") flags.push({ label: row.status, style: STATUS_FLAG_STYLE });
-  if (row.hasFirstArticleSibling) flags.push({ label: "First Article", style: FIRST_ARTICLE_FLAG_STYLE });
+  // Guard on !isFirstArticle: hasFirstArticleSibling is computed self-inclusively at the SQL
+  // layer (see lib/apiQuery.ts's hasFirstArticleLineSql) so an orphan FA row would otherwise
+  // show this flag on ITSELF -- the flag belongs on the parent, never on an FA line.
+  if (!row.isFirstArticle && row.hasFirstArticleSibling) flags.push({ label: "First Article", style: FIRST_ARTICLE_FLAG_STYLE });
   return flags;
 }
 
-// Nests each First Article Test row directly under its real-NSN sibling (same
-// solicitation_number_raw) within the currently-loaded, already-sorted row list -- the SQL
-// sort order (deadline/quantity/issued/nsn) has no reason to put them adjacent on its own,
-// so this is a presentation-only reordering, not a different query. A FAT row whose parent
-// isn't in this result set (filtered out, on a different page) is left in place, standalone.
-function withFirstArticlesNested(rows: ApiSolicitation[]): ApiSolicitation[] {
-  const fatRows = rows.filter((r) => r.isFirstArticle);
-  if (fatRows.length === 0) return rows;
-  const used = new Set<ApiSolicitation>();
-  const out: ApiSolicitation[] = [];
-  for (const row of rows) {
-    if (row.isFirstArticle) continue; // placed alongside its parent below, or at the end
-    out.push(row);
-    if (row.hasFirstArticleSibling) {
-      for (const fat of fatRows) {
-        if (!used.has(fat) && fat.solicitationNumberRaw === row.solicitationNumberRaw) {
-          out.push(fat);
-          used.add(fat);
-        }
-      }
-    }
-  }
-  for (const fat of fatRows) {
-    if (!used.has(fat)) out.push(fat); // no parent in this result set -- shown standalone
-  }
-  return out;
-}
 
 function Flags({ flags }: { flags: FlagInfo[] }) {
   if (flags.length === 0) return null;
@@ -442,8 +419,15 @@ function SolicitationsPage() {
     refetchInterval: 5 * 60 * 1000,
   });
 
-  const rawRows = useMemo(() => data?.pages.flatMap((p) => p.rows) ?? [], [data]);
-  const rows = useMemo(() => withFirstArticlesNested(rawRows), [rawRows]);
+  // Each page's rows already arrive with FA children (and page-1 orphans) assembled
+  // server-side, in order -- see app/api/solicitations/route.ts's withFirstArticlesAssembled.
+  // No client-side nesting needed; flatMap just concatenates pages in fetch order.
+  const rows = useMemo(() => data?.pages.flatMap((p) => p.rows) ?? [], [data]);
+  // "Showing X of Y": Y (total) is parent/normal rows only (see
+  // app/api/solicitations/route.ts's parentRowCondition), so X must match -- nested FA
+  // children and orphans are extra rendered rows, not extra loaded results, and must not
+  // inflate this count above the total they're drawn from.
+  const loadedParentCount = useMemo(() => rows.filter((r) => !r.isFirstArticle).length, [rows]);
   const total = data?.pages[0]?.total ?? 0;
   const capped = sort === "relevance" && (data?.pages[0]?.capped ?? false);
 
@@ -659,7 +643,7 @@ function SolicitationsPage() {
           </div>
           </div>
           <span className="ml-auto self-center text-sm text-zinc-600 dark:text-zinc-400">
-            Showing <strong className="text-black dark:text-zinc-50">{rows.length}</strong> of{" "}
+            Showing <strong className="text-black dark:text-zinc-50">{loadedParentCount}</strong> of{" "}
             <strong className="text-black dark:text-zinc-50">{total}</strong>
           </span>
         </div>
@@ -757,7 +741,11 @@ function SolicitationsPage() {
                     {row.isFirstArticle ? (
                       <>
                         <div />
-                        <div className="truncate pl-4 text-sm text-zinc-500 dark:text-zinc-400">↳ First Article test</div>
+                        <div
+                          className={`truncate text-sm text-zinc-500 dark:text-zinc-400 ${row.isOrphanFirstArticle ? "" : "pl-4"}`}
+                        >
+                          {firstArticleRowLabel(row.nomenclature, row.isOrphanFirstArticle)}
+                        </div>
                       </>
                     ) : (
                       <>

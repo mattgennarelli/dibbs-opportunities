@@ -226,16 +226,64 @@ export function postedCondition(sql: postgres.Sql, posted: PostedValue): postgre
 
 export type FirstArticleValue = "include" | "exclude" | "only";
 
-// A First Article Test line item: a non-NSN row whose nomenclature marks it as the testing
-// step for a real-NSN line elsewhere in the same solicitation. Kept as a single literal
-// fragment (not a function returning a boolean column) so the exact same text is used
-// everywhere it matters: here, in is_first_article (SELECT), and in has_first_article_sibling
-// (the correlated EXISTS) -- see app/api/solicitations/route.ts.
+// A First Article Test (FA) line item: a non-NSN row whose nomenclature marks it as the
+// testing step for a real-NSN line elsewhere in the same solicitation -- either the
+// "GOVERNMENT FIRST ARTIC[LE TEST]" or "CONTRACTOR FIRST ARTIC[LE TEST]" variant (both
+// truncated at the same width by DIBBS; confirmed live on SPE7L7-27-Q-0302, which has a
+// CONTRACTOR line). `%FIRST ART%` catches both without over-matching: queried every other
+// non-NSN nomenclature in the table (2026-11-23) and the only ones containing "FIRST ART"
+// are these two. Everything else non-NSN (raw-stock items like ANGLE/BEARING/BUSHING/SPRING,
+// plus distinct non-FA testing concepts: "PRODUCTION LOT TESTING", "PRODUCTION CONTROL
+// TESTING", "NON-NSN ITEM") is correctly left alone by this pattern. Kept as a single
+// literal fragment (not a function returning a boolean column) so the exact same text is
+// used everywhere it matters: here, and inside the two EXISTS subqueries below.
 export const IS_FIRST_ARTICLE_SQL = (sql: postgres.Sql) =>
-  sql`(nsn_digits IS NULL AND nomenclature LIKE 'GOVERNMENT FIRST ART%')`;
+  sql`(nsn_digits IS NULL AND nomenclature LIKE '%FIRST ART%')`;
 
+// Every query that touches First Article status operates on `open_solicitations`
+// unaliased -- these two fragments rely on that: the bare column names inside each EXISTS
+// subquery (via IS_FIRST_ARTICLE_SQL) resolve to the subquery's OWN aliased copy of the
+// table (innermost scope wins in SQL), while `open_solicitations.solicitation_number_raw`
+// explicitly reaches the outer row being evaluated. If a caller ever needs to run one of
+// these against an aliased copy of the table, these must be revisited.
+
+// EXISTS an FA line item anywhere on this row's solicitation. Deliberately self-inclusive:
+// an FA row's own existence satisfies this for ITSELF too. That's required for an orphan FA
+// row (no real-NSN parent) to still match firstArticle=only on its own -- see
+// parentRowCondition and the "orphan" handling in app/api/solicitations/route.ts.
+export function hasFirstArticleLineSql(sql: postgres.Sql): postgres.Fragment {
+  return sql`EXISTS (
+    SELECT 1 FROM open_solicitations fa_check
+    WHERE fa_check.solicitation_number_raw = open_solicitations.solicitation_number_raw
+      AND ${IS_FIRST_ARTICLE_SQL(sql)}
+  )`;
+}
+
+// EXISTS a real-NSN (non-FA) row on this row's solicitation. Used to tell an FA row with a
+// real parent apart from an "orphan" FA row that has none.
+export function hasNonFirstArticleParentSql(sql: postgres.Sql): postgres.Fragment {
+  return sql`EXISTS (
+    SELECT 1 FROM open_solicitations parent_check
+    WHERE parent_check.solicitation_number_raw = open_solicitations.solicitation_number_raw
+      AND NOT ${IS_FIRST_ARTICLE_SQL(sql)}
+  )`;
+}
+
+// The main rows/count/facets query is restricted to this, always, regardless of
+// `firstArticle` mode: FA line items never match filters, search, sort, or pagination on
+// their own (they're fetched separately, per page, and nested under their parent -- or, for
+// a true orphan with no parent, fetched separately again and shown standalone). This is the
+// one condition that keeps totals and facet counts "parent/normal rows only."
+export function parentRowCondition(sql: postgres.Sql): postgres.Fragment {
+  return sql`NOT ${IS_FIRST_ARTICLE_SQL(sql)}`;
+}
+
+// Solicitation-level filter: does this solicitation have an FA line at all? Applied ON TOP
+// of parentRowCondition in the main query, so it's only ever evaluated for real-NSN rows
+// here (an orphan FA row's own "only"/"exclude" membership is decided separately, by
+// parentRowCondition's inverse, where it's fetched -- see app/api/solicitations/route.ts).
 export function firstArticleCondition(sql: postgres.Sql, mode: FirstArticleValue): postgres.Fragment {
   if (mode === "include") return sql`true`;
-  const isFat = IS_FIRST_ARTICLE_SQL(sql);
-  return mode === "exclude" ? sql`NOT ${isFat}` : isFat;
+  const hasFaLine = hasFirstArticleLineSql(sql);
+  return mode === "exclude" ? sql`NOT ${hasFaLine}` : hasFaLine;
 }

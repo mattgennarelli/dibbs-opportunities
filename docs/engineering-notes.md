@@ -1,5 +1,50 @@
 # Notes
 
+## First Article (FA) handling: full fix design (2026-11-23)
+
+Earlier versions mixed FA line items (non-NSN rows marking a First Article Test step for a
+real-NSN line on the same solicitation) directly into the main rows query, nested client-side.
+Two real bugs followed from that: an FA row could independently match search/filters and show
+up as an unexplained standalone row, and a parent/FA pair could land on different pages of a
+cursor walk (they competed for the same `LIMIT`/keyset cursor as ordinary rows).
+
+**Detection**: initially matched only `nomenclature LIKE 'GOVERNMENT FIRST ART%'`. Found live
+(SPE7L7-27-Q-0302) that a second variant exists -- "CONTRACTOR FIRST ARTIC" (DIBBS truncates
+both to the same column width). Queried every other non-NSN nomenclature in the table to make
+sure a broader `%FIRST ART%` pattern wouldn't over-match: it doesn't. See the README's Next
+Steps for the one other category found by that same query (`PRODUCTION LOT/CONTROL TESTING`),
+which is NOT First Article and is correctly left alone.
+
+**Design**: `IS_FIRST_ARTICLE_SQL` (`lib/apiQuery.ts`) is the single source of truth for "is
+this row an FA line," reused everywhere. Two correlated-EXISTS fragments build on it:
+- `hasFirstArticleLineSql` -- does this solicitation have an FA line at all? Deliberately
+  self-inclusive (an FA row's own existence satisfies this for itself) so a true orphan still
+  matches `firstArticle=only` on its own, with no separate orphan-specific filter condition
+  needed.
+- `hasNonFirstArticleParentSql` -- does this solicitation have a real-NSN row? Used only to
+  tell an FA row with a parent apart from an orphan.
+
+`parentRowCondition` (`NOT IS_FIRST_ARTICLE_SQL`) is applied to the main
+rows/count/facets query, always, regardless of `firstArticle` mode -- this is what keeps FA
+rows out of search/filter/sort/pagination entirely, and keeps totals/facet counts
+"parent rows only" as specified. Two supplementary queries, run per request inside the same
+transaction: FA children, scoped by `solicitation_number_raw = ANY(<this page's parent
+solicitation numbers>)` (so a parent and its child always arrive in the same HTTP response,
+never split across a cursor walk); and orphans, scoped by "no real-NSN parent exists,"
+fetched only on the first page of a request (cursor null / offset 0) since they aren't
+paginated at all -- fetching them on every page would repeat the same orphans on every page
+of a cursor walk. Both are assembled into the final row list server-side
+(`lib/firstArticle.ts`'s `withFirstArticlesAssembled`), which is also why it's a plain
+function with no SQL dependency -- fully unit-testable, see `tests/firstArticle.test.ts`.
+
+Both EXISTS fragments correlate on `solicitation_number_raw`, which had no index before this
+feature -- added in migration `009_solicitation_number_raw_index.sql`.
+
+**Known follow-up, not done here**: a `PRODUCTION LOT TESTING` / `PRODUCTION CONTROL TESTING`
+line (91 / 2 rows respectively) is a distinct non-NSN category, not First Article, and
+currently renders as an ordinary row with no special treatment. Flagged in the README's Next
+Steps as a possible future flag, pending confirmation of what these actually represent.
+
 ## Keyset vs. `OFFSET` pagination, measured head-to-head (2026-11-23)
 
 README cites this table for the keyset-pagination decision. Query: `sort=quantity&dir=desc`

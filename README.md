@@ -17,8 +17,11 @@ filterable table, instead of the original take-home's client-side JSON pass-thro
 - Filters: FSC, set-aside type, min quantity, "closing within N days," Fast Award, has tech
   docs — each with live counts.
 - **Flags**: new-in-24h, Fast Award, First Article Test.
-- **First Article Test nesting**: a FAT line item (no real NSN) renders indented directly
-  under its parent real-NSN row, instead of as an unrelated orphan row.
+- **First Article Test (FA) nesting**: an FA line item (no real NSN, "GOVERNMENT FIRST
+  ARTIC..." or "CONTRACTOR FIRST ARTIC...") renders indented directly under its parent
+  real-NSN row, labeled with which variant it is — never as a standalone row competing with
+  real listings in search/filters/sort. A genuine orphan (an FA line with no parent anywhere)
+  is shown alone instead, clearly labeled "parent item not listed."
 - **Tech docs**: just says "On DIBBS" when present — never fetches or displays the documents
   themselves (per project rule; DIBBS requires its own login for those).
 - Sortable columns (deadline, quantity, issued date, FSC, NSN), each a real indexed sort, not
@@ -82,6 +85,17 @@ flowchart LR
 - **Default view is `posted=latest`** (today's posting date, by `MAX(source_date)`, not
   wall-clock "today") rather than "all open" — a vendor's first question is "what's new," and
   defaulting to everything open buries that under weeks of older listings.
+- **First Article (FA) line items never enter the main query** — the main rows/count/facets
+  query is always restricted to real-NSN/normal rows (`parentRowCondition`, see
+  [`lib/apiQuery.ts`](lib/apiQuery.ts)), so an FA line can't independently match search,
+  filters, sort, or pagination, and totals/facet counts never include them. Each page's FA
+  children are fetched in a second query, scoped to exactly that page's parent solicitation
+  numbers, and assembled server-side before the response goes out — a parent and its FA line
+  can never land on different pages. A genuine orphan (FA line with no real-NSN parent
+  anywhere) is fetched separately again and shown once, on the first page only. Both
+  supplementary queries correlate on `solicitation_number_raw`, which needed its own index
+  (migration [009](db/migrations/009_solicitation_number_raw_index.sql) — it wasn't indexed
+  before this feature existed).
 - **No caching layer yet** — not needed: the indexed queries above already return in
   low-single-digit milliseconds. The design for scale, when it is needed: tag cache entries by
   `(filters, sort, cursor)` and invalidate the whole tag set on every ingest write (not a TTL,
@@ -120,6 +134,25 @@ any visible error:
     was invisible to every API route until the view was explicitly re-issued (migration 005).
   - `postgres.js` returns `bigint` columns (`id`) as strings to avoid precision loss — cursor
     encoding has to convert explicitly rather than assume a JS number.
+- **The `iconSb` fix, verified at scale**: after the regex fix above, every previously-ingested
+  date was re-ingested to correct historical rows (not just new ones going forward).
+  Table-wide badge counts before/after:
+
+  | Badge | Before fix | After |
+  |---|---|---|
+  | `other` (catch-all — the bug) | 5,449 | **0** |
+  | `smallBusinessSetAside` | not separately counted (lumped into `other`) | 2,452 |
+  | `sdvosb` | 118 | 302 |
+  | `hubZone` | 54 | 241 |
+  | `wosb` | 32 | 103 |
+  | `unrestricted` | 14,441 | 15,757 *(includes 11-23 data ingested after)* |
+  | `fastAward` | 8,780 | 9,867 *(ditto)* |
+
+  `other` is now a real catch-all (currently empty), not a silent dumping ground for a badge
+  the regex failed to recognize.
+- **Single-date ingest verified against a live run** (`npm run ingest -- 11-23-2026`, after
+  the above backfill completed): Records Found = 1,493, rows parsed = 1,493 — exact match,
+  `status: complete`, 0 errors, 1,493 inserted / 0 collisions.
 
 ## Scale: what breaks first at 100x
 
@@ -170,6 +203,26 @@ npm test                           # regression tests against real captured HTML
 Env vars (see `lib/db.ts`, `scripts/migrate.ts`): `DATABASE_URL` (pooled, used by the app and
 ingest's writes) and `DATABASE_URL_DIRECT` (direct/non-pooled, migrations only — see that
 file's comment on why pooled connections can't run them).
+
+## Next steps
+
+- **Two-phase keyset for nullable sort columns**: the keyset-vs-`OFFSET` comparison above
+  found that a nullable column's cursor predicate (`quantity IS NULL OR (quantity, id) <
+  cursor`) can't be pushed down as a real index seek — Postgres evaluates it as a `Filter`,
+  not an `Index Cond`, so the plan still walks past every row ahead of the cursor instead of
+  jumping to it directly (see `docs/engineering-notes.md`). A two-phase version — first seek
+  the non-null range with a real `Index Cond` when the cursor is non-null, only falling into
+  the `IS NULL` branch once that range is exhausted — would turn this into a genuine seek for
+  `quantity`/`issued`/`fsc`/`nsn` (all nullable); `deadline` already isn't nullable and
+  doesn't have this problem. Not implemented — current depths are fast enough (worst case
+  measured ~6ms) that this is a "when it matters more" optimization, not a correctness issue.
+- **A "Testing required" flag for `PRODUCTION LOT TESTING` / `PRODUCTION CONTROL TESTING`
+  lines**: these are real, distinct non-NSN line items (91 and 2 rows respectively, found
+  while auditing other non-NSN nomenclatures for the FA fix) that are NOT First Article Test
+  lines — they're left alone by the `%FIRST ART%` pattern and currently just render as
+  ordinary rows. They may be worth their own flag so a vendor can spot "this isn't a normal
+  catalog buy" the same way they now can for FA lines; not done here since it wasn't asked
+  for and needs its own confirmation of what these mean before adding UI for them.
 
 ## Known limitations
 

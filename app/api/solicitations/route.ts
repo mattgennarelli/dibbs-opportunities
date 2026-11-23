@@ -14,8 +14,10 @@
 //   comments for why these two need genuinely different cursor shapes.
 
 import { NextResponse, connection } from "next/server";
+import type postgres from "postgres";
 import { sql } from "@/lib/db";
 import { dbRowToSolicitation, type SolicitationDbRow } from "@/lib/dbRow";
+import { withFirstArticlesAssembled } from "@/lib/firstArticle";
 import {
   QuerySchema,
   rawQueryFromSearchParams,
@@ -25,25 +27,26 @@ import {
   fscCondition,
   postedCondition,
   firstArticleCondition,
+  parentRowCondition,
   IS_FIRST_ARTICLE_SQL,
+  hasFirstArticleLineSql,
+  hasNonFirstArticleParentSql,
   isNsnLooking,
   browseOrderBy,
   browseKeysetCondition,
   type BrowseCursor,
   type BrowseSortKey,
   type SearchCursor,
+  type PostedValue,
 } from "@/lib/apiQuery";
 
 // Every rows query selects exactly these columns, with date/timestamp columns cast to text
 // so postgres.js returns plain strings (its default JS Date objects don't match the
 // Solicitation type's "YYYY-MM-DD"/ISO-string contract the rest of the app already relies on).
-// is_new/is_first_article/has_first_article_sibling are all computed here, not stored -- see
-// lib/dbRow.ts's SolicitationDbRow comment.
-//
-// has_first_article_sibling is scoped to open_solicitations (not the raw table) so it only
-// flags a sibling that's actually part of the CURRENT result set's universe (open, not
-// closed/removed) -- a closed FAT line shouldn't make an otherwise-unrelated open row show
-// a "First Article" flag for a test that's no longer relevant.
+// is_new/is_first_article/has_first_article_sibling/is_orphan_first_article are all computed
+// here, not stored -- see lib/dbRow.ts's SolicitationDbRow comment. The same column set is
+// used for the parent-rows query AND the two supplementary FA queries below (children,
+// orphans) so every row this route returns has an identical shape.
 //
 // Built inside the handler (per request), not at module scope: `sql` is a lazily-initialized
 // Proxy (see lib/db.ts) specifically so importing this route never touches Postgres -- even
@@ -58,12 +61,48 @@ function rowColumns() {
     source_date::text, fetched_at::text, fsc, solicitation_type,
     (first_seen_at > now() - interval '24 hours') AS is_new,
     ${IS_FIRST_ARTICLE_SQL(sql)} AS is_first_article,
-    EXISTS (
-      SELECT 1 FROM open_solicitations s2
-      WHERE s2.solicitation_number_raw = open_solicitations.solicitation_number_raw
-        AND s2.id != open_solicitations.id
-        AND (s2.nsn_digits IS NULL AND s2.nomenclature LIKE 'GOVERNMENT FIRST ART%')
-    ) AS has_first_article_sibling
+    ${hasFirstArticleLineSql(sql)} AS has_first_article_sibling,
+    (${IS_FIRST_ARTICLE_SQL(sql)} AND NOT ${hasNonFirstArticleParentSql(sql)}) AS is_orphan_first_article
+  `;
+}
+
+// Fetches every FA line item belonging to any of these solicitations -- called once per
+// page, scoped to exactly that page's (real-NSN) parent rows, so a parent and its FA line
+// are always assembled into the same response and can never land on different pages.
+async function fetchFirstArticleChildren(
+  tx: postgres.TransactionSql,
+  rowColumnsFragment: postgres.Fragment,
+  solicitationNumbers: string[]
+): Promise<SolicitationDbRow[]> {
+  if (solicitationNumbers.length === 0) return [];
+  return tx<SolicitationDbRow[]>`
+    SELECT ${rowColumnsFragment}
+    FROM open_solicitations
+    WHERE ${IS_FIRST_ARTICLE_SQL(sql)}
+      AND solicitation_number_raw = ANY(${solicitationNumbers}::text[])
+  `;
+}
+
+// Fetches "orphan" FA line items -- FA rows with no real-NSN row anywhere on their
+// solicitation to nest under. These are NOT part of the main query/count/facets (rule:
+// totals and facets are parent/normal rows only), so they're fetched here, separately, and
+// shown standalone in the UI. Deliberately not filtered by q/fsc/setAside/etc -- rule: FA
+// rows never match filters or search on their own -- but `posted` still applies, since
+// that's universe-scoping (which date window counts as "current"), not a content filter.
+// Only run on the first page of a request (no cursor / offset 0): since orphans aren't
+// paginated at all, fetching them on every page would show the same ones repeatedly on a
+// cursor walk instead of exactly once.
+async function fetchOrphanFirstArticleRows(
+  tx: postgres.TransactionSql,
+  rowColumnsFragment: postgres.Fragment,
+  posted: PostedValue
+): Promise<SolicitationDbRow[]> {
+  return tx<SolicitationDbRow[]>`
+    SELECT ${rowColumnsFragment}
+    FROM open_solicitations
+    WHERE ${IS_FIRST_ARTICLE_SQL(sql)}
+      AND NOT ${hasNonFirstArticleParentSql(sql)}
+      AND ${postedCondition(sql, posted)}
   `;
 }
 
@@ -109,7 +148,11 @@ export async function GET(request: Request) {
   const result = await sql.begin(async (tx) => {
     await tx`SET LOCAL pg_trgm.word_similarity_threshold = 0.3`;
 
-    const where = sql`${fscCondition(sql, query.fsc)} AND ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, filters)}`;
+    // parentRowCondition: FA line items never match filters/search/sort/pagination on their
+    // own -- the main query (rows, total, and facets in app/api/facets/route.ts) is always
+    // restricted to real-NSN/normal rows. Their FA children and any orphan FA rows are
+    // fetched separately, below, and assembled into the response afterward.
+    const where = sql`${parentRowCondition(sql)} AND ${fscCondition(sql, query.fsc)} AND ${postedCondition(sql, query.posted)} AND ${firstArticleCondition(sql, query.firstArticle)} AND ${buildFilterConditions(sql, filters)}`;
 
     const total = (await tx`SELECT COUNT(*)::bigint AS total FROM open_solicitations WHERE ${where}`)[0].total as bigint;
 
@@ -118,7 +161,7 @@ export async function GET(request: Request) {
       // without it.
       const q = query.q as string;
       const offset = (cursor as SearchCursor | null)?.offset ?? 0;
-      const rows = await tx<SolicitationDbRow[]>`
+      const rows = await tx<(SolicitationDbRow & { id: number })[]>`
         SELECT * FROM (
           SELECT ${ROW_COLUMNS},
             CASE WHEN ${isNsnLooking(q)} THEN NULL ELSE word_similarity(${q}::text, nomenclature) END AS rank,
@@ -137,8 +180,18 @@ export async function GET(request: Request) {
       const cappedTotal = total > SEARCH_CAP ? SEARCH_CAP : Number(total);
       const nextOffset = offset + rows.length;
       const nextCursor = nextOffset < cappedTotal ? encodeCursor({ type: "search", offset: nextOffset }) : null;
+
+      const solicitationNumbers = [...new Set(rows.map((r) => r.solicitation_number_raw))];
+      const children = await fetchFirstArticleChildren(tx, ROW_COLUMNS, solicitationNumbers);
+      const isFirstPage = offset === 0;
+      const orphans =
+        query.firstArticle !== "exclude" && isFirstPage
+          ? await fetchOrphanFirstArticleRows(tx, ROW_COLUMNS, query.posted)
+          : [];
+      const displayRows = withFirstArticlesAssembled(rows, children, orphans);
+
       return {
-        rows: rows.map(dbRowToSolicitation),
+        rows: displayRows.map(dbRowToSolicitation),
         nextCursor,
         total: Number(total),
         capped: total > SEARCH_CAP,
@@ -177,8 +230,21 @@ export async function GET(request: Request) {
       // real number (decodeCursor's typeof check rejects a string id as malformed).
       nextCursor = encodeCursor({ type: "browse", sortKey, dir: query.dir, v, id: Number(last.id) });
     }
+
+    // Fetched and assembled AFTER paging the parent rows, scoped to exactly this page's
+    // solicitation numbers -- a parent and its FA child always arrive in the same response,
+    // so a cursor walk can never split them across pages.
+    const solicitationNumbers = [...new Set(pageRows.map((r) => r.solicitation_number_raw))];
+    const children = await fetchFirstArticleChildren(tx, ROW_COLUMNS, solicitationNumbers);
+    const isFirstPage = browseCursor === null;
+    const orphans =
+      query.firstArticle !== "exclude" && isFirstPage
+        ? await fetchOrphanFirstArticleRows(tx, ROW_COLUMNS, query.posted)
+        : [];
+    const displayRows = withFirstArticlesAssembled(pageRows, children, orphans);
+
     return {
-      rows: pageRows.map(dbRowToSolicitation),
+      rows: displayRows.map(dbRowToSolicitation),
       nextCursor,
       total: Number(total),
     };
