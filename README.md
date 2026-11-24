@@ -33,7 +33,7 @@ filterable table, instead of the original take-home's client-side JSON pass-thro
 
 ```mermaid
 flowchart LR
-    A[GitHub Actions<br/>cron, nightly] --> B[Playwright ingest<br/>headless Chromium]
+    A[GitHub Actions<br/>cron, every 3h] --> B[Playwright ingest<br/>headless Chromium]
     B --> C[(Neon Postgres)]
     C --> D[Next.js API routes<br/>filters, cursor pagination,<br/>fuzzy search, facets]
     D --> E[UI<br/>TanStack Query + Virtual]
